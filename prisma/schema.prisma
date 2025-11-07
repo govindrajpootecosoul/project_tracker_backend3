@@ -1,0 +1,388 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(auto()) @map("_id") @db.ObjectId
+  name          String?
+  email         String    @unique
+  emailVerified DateTime? @map("emailVerifiedAt")
+  image         String?   @map("avatar")
+  password      String?
+  department    String?
+  role          String    @default("user") // Store as string to match database (user/admin/superadmin)
+  employeeId    String?   @map("employeeId")
+  company       String?
+  isActive      Boolean   @default(true) @map("isActive")
+  invitedBy     String?   @map("invitedBy") @db.ObjectId
+  accessibleProjects String[] @map("accessibleProjects")
+  resetPasswordToken String? @map("resetPasswordToken")
+  resetPasswordExpires DateTime? @map("resetPasswordExpires")
+  invitationToken String? @map("invitationToken")
+  invitationExpires DateTime? @map("invitationExpires")
+  emailVerificationToken String? @map("emailVerificationToken")
+  hasCredentialAccess Boolean @default(false)
+  hasSubscriptionAccess Boolean @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  // Relations
+  tasksAssigned TaskAssignee[]
+  tasksCreated  Task[]             @relation("TaskCreator")
+  tasksReviewRequested Task[]      @relation("ReviewRequestedBy")
+  tasksReviewed Task[]             @relation("ReviewedBy")
+  tasksReviewing Task[]             @relation("Reviewer")
+  projects      ProjectMember[]
+  teams         TeamMember[]
+  comments      Comment[]
+  emailLogs     EmailLog[]
+  notifications Notification[]
+  activities    ActivityLog[]
+  credentialsCreated Credential[]   @relation("CredentialCreator")
+  credentialMembers  CredentialMember[]
+  subscriptionsCreated Subscription[] @relation("SubscriptionCreator")
+  subscriptionMembers SubscriptionMember[]
+  
+  @@map("users")
+}
+
+model Task {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  title       String
+  description String?
+  status      TaskStatus @default(IN_PROGRESS)
+  priority    TaskPriority @default(MEDIUM)
+  dueDate     DateTime?
+  projectId   String?  @db.ObjectId
+  brand       String?
+  tags        String?  // JSON array of tags
+  recurring   RecurringType?
+  reviewStatus TaskReviewStatus? // REVIEW_REQUESTED, UNDER_REVIEW, APPROVED, REJECTED, null
+  reviewRequestedById String? @db.ObjectId // User who requested review
+  reviewRequestedAt DateTime? // When review was requested
+  reviewerId String? @db.ObjectId // User who was requested to review (pending acceptance)
+  reviewedById String? @db.ObjectId // User who reviewed
+  reviewedAt DateTime? // When review was completed
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdById String   @db.ObjectId
+  
+  // Relations
+  createdBy   User      @relation("TaskCreator", fields: [createdById], references: [id])
+  project     Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  assignees   TaskAssignee[]
+  comments    Comment[]
+  reviewRequestedBy User? @relation("ReviewRequestedBy", fields: [reviewRequestedById], references: [id])
+  reviewedBy User? @relation("ReviewedBy", fields: [reviewedById], references: [id])
+  reviewer User? @relation("Reviewer", fields: [reviewerId], references: [id])
+  
+  @@map("tasks")
+}
+
+model TaskAssignee {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  taskId    String   @db.ObjectId
+  userId    String   @db.ObjectId
+  assignedAt DateTime @default(now())
+  
+  // Relations
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([taskId, userId])
+  @@map("task_assignees")
+}
+
+model Project {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  name        String
+  description String?
+  brand       String?
+  company     String?
+  status      ProjectStatus @default(ACTIVE)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  tasks       Task[]
+  members     ProjectMember[]
+  
+  @@map("projects")
+}
+
+model ProjectMember {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  projectId String   @db.ObjectId
+  userId    String   @db.ObjectId
+  role      String   @default("member")
+  joinedAt  DateTime @default(now())
+  
+  // Relations
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([projectId, userId])
+  @@map("project_members")
+}
+
+model Team {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  members   TeamMember[]
+  
+  @@map("teams")
+}
+
+model TeamMember {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  teamId    String   @db.ObjectId
+  userId    String   @db.ObjectId
+  role      String   @default("member")
+  joinedAt  DateTime @default(now())
+  
+  // Relations
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([teamId, userId])
+  @@map("team_members")
+}
+
+model Comment {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  content   String
+  taskId    String   @db.ObjectId
+  userId    String   @db.ObjectId
+  mentions  String?  // JSON array of user IDs mentioned in comment
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("comments")
+}
+
+model EmailLog {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  to        String   // JSON array of emails
+  cc        String?  // JSON array of emails
+  subject   String
+  body      String
+  sentAt    DateTime @default(now())
+  userId    String   @db.ObjectId
+  
+  // Relations
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("email_logs")
+}
+
+model ActivityLog {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  type        ActivityType
+  action      String   // e.g., "Task Created", "Task Updated", "Review Assigned"
+  description String   // Detailed description
+  entityType  String?  // "task", "project", "email", etc.
+  entityId    String?  @db.ObjectId // ID of the related entity
+  metadata    String?  // JSON string for additional data
+  userId      String   @db.ObjectId
+  createdAt   DateTime @default(now())
+  
+  // Relations
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("activity_logs")
+}
+
+enum ActivityType {
+  TASK_CREATED
+  TASK_UPDATED
+  TASK_DELETED
+  TASK_STATUS_CHANGED
+  TASK_ASSIGNED
+  TASK_REVIEW_REQUESTED
+  TASK_REVIEW_ACCEPTED
+  TASK_REVIEW_COMPLETED
+  PROJECT_CREATED
+  PROJECT_UPDATED
+  PROJECT_COMPLETED
+  EMAIL_SENT
+  COMMENT_ADDED
+}
+
+model Notification {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @db.ObjectId
+  type      NotificationType
+  title     String
+  message   String
+  link      String?  // Optional link to related resource (e.g., /tasks/123, /projects/456)
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  readAt    DateTime?
+  
+  // Relations
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId, read])
+  @@map("notifications")
+}
+
+model Credential {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  company       String
+  geography     String
+  platform      String
+  url           String?
+  username      String
+  password      String
+  authenticator String?
+  notes         String?
+  privacyLevel  CredentialPrivacyLevel @default(PRIVATE)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  createdById   String   @db.ObjectId
+  
+  // Relations
+  createdBy     User     @relation("CredentialCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  members       CredentialMember[]
+  
+  @@map("credentials")
+}
+
+model CredentialMember {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  credentialId  String   @db.ObjectId
+  userId        String   @db.ObjectId
+  role          String   @default("viewer") // viewer, editor
+  joinedAt      DateTime @default(now())
+  isActive      Boolean  @default(true) // Can be activated/deactivated by admin
+  
+  // Relations
+  credential    Credential @relation(fields: [credentialId], references: [id], onDelete: Cascade)
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([credentialId, userId])
+  @@map("credential_members")
+}
+
+model Subscription {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  name          String   // Website/App Name
+  url           String?
+  amount        Float
+  currency      String   @default("USD")
+  status        SubscriptionStatus @default(ACTIVE)
+  billingCycle  BillingCycle
+  startDate     DateTime
+  renewalDate   DateTime
+  description   String?
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  createdById   String   @db.ObjectId
+  
+  // Relations
+  createdBy     User     @relation("SubscriptionCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  members       SubscriptionMember[]
+  
+  @@map("subscriptions")
+}
+
+model SubscriptionMember {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  subscriptionId String  @db.ObjectId
+  userId        String   @db.ObjectId
+  role          String   @default("viewer") // viewer, editor
+  joinedAt      DateTime @default(now())
+  isActive      Boolean  @default(true) // Can be activated/deactivated by admin
+  
+  // Relations
+  subscription  Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([subscriptionId, userId])
+  @@map("subscription_members")
+}
+
+enum TaskStatus {
+  IN_PROGRESS
+  COMPLETED
+  YTS           // Yet to Start
+  ON_HOLD
+  RECURRING
+}
+
+enum TaskReviewStatus {
+  REVIEW_REQUESTED // Review request sent, waiting for acceptance
+  UNDER_REVIEW     // Review accepted, task is under review
+  APPROVED
+  REJECTED
+}
+
+enum TaskPriority {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum RecurringType {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+enum ProjectStatus {
+  ACTIVE
+  COMPLETED
+  ON_HOLD
+  CANCELLED
+}
+
+enum NotificationType {
+  REQUEST      // Project/task request
+  COMMENT      // New comment on task
+  INVITE       // Team/project invite
+  TASK_ASSIGNED // Task assigned to user
+  PROJECT_INVITE // Project invitation
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  USER
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELLED
+  EXPIRED
+  PAUSED
+}
+
+enum BillingCycle {
+  MONTHLY
+  QUARTERLY
+  YEARLY
+  WEEKLY
+}
+
+enum CredentialPrivacyLevel {
+  PRIVATE
+  PUBLIC
+}
+
