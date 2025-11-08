@@ -13,7 +13,7 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const { to, cc, subject, body } = req.body
+    const { to, cc, subject, body, includeDepartmentTasks } = req.body
 
     // Validate required fields - check for empty strings as well
     if (!to || (typeof to === 'string' && !to.trim())) {
@@ -42,23 +42,62 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
       : []
     const ccArray = ccArrayFiltered.length > 0 ? ccArrayFiltered : null
 
-    // Fetch tasks with status "IN_PROGRESS" or recurring tasks
-    const tasks = await prisma.task.findMany({
-      where: {
-        OR: [
-          { status: 'IN_PROGRESS' },
-          { recurring: { not: null } },
-        ],
-        assignees: {
-          some: {
-            userId: req.userId,
+    // Fetch tasks based on option
+    let tasks: any[] = []
+    
+    if (includeDepartmentTasks) {
+      // Get logged-in user's department
+      const currentUser = await prisma.user.findUnique({
+        where: { id: req.userId },
+        select: { department: true },
+      })
+
+      if (currentUser?.department) {
+        // Get all users in the same department
+        const departmentUsers = await prisma.user.findMany({
+          where: {
+            department: currentUser.department,
           },
-        },
-      },
-      include: {
-        assignees: {
+          select: { id: true },
+        })
+
+        const departmentUserIds = departmentUsers.map(u => u.id)
+
+        // Fetch tasks from department members with status "IN_PROGRESS" or recurring
+        tasks = await prisma.task.findMany({
+          where: {
+            OR: [
+              { status: 'IN_PROGRESS' },
+              { recurring: { not: null } },
+            ],
+            assignees: {
+              some: {
+                userId: {
+                  in: departmentUserIds,
+                },
+              },
+            },
+          },
           include: {
-            user: {
+            assignees: {
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    name: true,
+                    email: true,
+                    department: true,
+                  },
+                },
+              },
+            },
+            project: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+            createdBy: {
               select: {
                 id: true,
                 name: true,
@@ -66,25 +105,56 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
               },
             },
           },
-        },
-        project: {
-          select: {
-            id: true,
-            name: true,
+          orderBy: {
+            createdAt: 'desc',
+          },
+        })
+      }
+    } else {
+      // Fetch only user's own tasks with status "IN_PROGRESS" or recurring
+      tasks = await prisma.task.findMany({
+        where: {
+          OR: [
+            { status: 'IN_PROGRESS' },
+            { recurring: { not: null } },
+          ],
+          assignees: {
+            some: {
+              userId: req.userId,
+            },
           },
         },
-        createdBy: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
+        include: {
+          assignees: {
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                },
+              },
+            },
+          },
+          project: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+          createdBy: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
           },
         },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    })
+        orderBy: {
+          createdAt: 'desc',
+        },
+      })
+    }
 
     // Helper function to escape HTML
     const escapeHtml = (text: string | null | undefined): string => {
@@ -120,9 +190,13 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
         `
       }).join('')
 
+      const tableTitle = includeDepartmentTasks 
+        ? 'Department Tasks Summary (IN_PROGRESS & RECURRING)'
+        : 'My Tasks Summary (IN_PROGRESS & RECURRING)'
+      
       tasksTableHTML = `
         <br><br>
-        <h3 style="color: #333; font-family: Arial, sans-serif;">Tasks Summary</h3>
+        <h3 style="color: #333; font-family: Arial, sans-serif;">${tableTitle}</h3>
         <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; font-size: 14px;">
           <thead>
             <tr style="background-color: #4CAF50; color: white;">

@@ -143,21 +143,40 @@ router.get('/team', authMiddleware, async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const userProjects = await prisma.projectMember.findMany({
-      where: { userId: req.userId },
-      select: { projectId: true },
+    // Get logged-in user's department
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { department: true },
     })
 
-    const projectIds = userProjects.map(p => p.projectId)
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' })
+    }
 
+    // If user has no department, return empty array
+    if (!currentUser.department) {
+      return res.json([])
+    }
+
+    // Get all users in the same department
+    const departmentUsers = await prisma.user.findMany({
+      where: {
+        department: currentUser.department,
+        id: { not: req.userId }, // Exclude current user
+      },
+      select: { id: true },
+    })
+
+    const departmentUserIds = departmentUsers.map(u => u.id)
+
+    // Get tasks assigned to users in the same department
     const tasks = await prisma.task.findMany({
       where: {
-        projectId: {
-          in: projectIds,
-        },
         assignees: {
-          none: {
-            userId: req.userId,
+          some: {
+            userId: {
+              in: departmentUserIds,
+            },
           },
         },
       },
