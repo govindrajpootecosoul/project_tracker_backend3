@@ -1,5 +1,5 @@
 import { Router, Response } from 'express'
-import { prisma } from '../../lib/prisma'
+import { prisma } from '../lib/prisma'
 import { authMiddleware, AuthRequest } from '../middleware/auth'
 import { logActivity } from '../utils/activityLogger'
 
@@ -639,6 +639,14 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
     })
     
     // Log activity for task update
+    if (!updatedTask) {
+      return res.status(404).json({ error: 'Task not found after update' })
+    }
+
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
     const changes: string[] = []
     if (title && title !== oldTask.title) changes.push(`title: "${oldTask.title}" → "${title}"`)
     if (status && status !== oldTask.status) {
@@ -715,19 +723,21 @@ router.delete('/:id', authMiddleware, async (req: AuthRequest, res: Response) =>
     })
 
     // Log activity
-    await logActivity({
-      type: 'TASK_DELETED',
-      action: 'Task Deleted',
-      description: `Deleted task "${task.title}"${task.project ? ` from project "${task.project.name}"` : ''}`,
-      entityType: 'task',
-      entityId: task.id,
-      metadata: {
-        taskTitle: task.title,
-        projectName: task.project?.name,
-        status: task.status,
-      },
-      userId: req.userId,
-    })
+    if (req.userId) {
+      await logActivity({
+        type: 'TASK_DELETED',
+        action: 'Task Deleted',
+        description: `Deleted task "${task.title}"${task.project ? ` from project "${task.project.name}"` : ''}`,
+        entityType: 'task',
+        entityId: task.id,
+        metadata: {
+          taskTitle: task.title,
+          projectName: task.project?.name,
+          status: task.status,
+        },
+        userId: req.userId,
+      })
+    }
 
     res.json({ message: 'Task deleted successfully' })
   } catch (error) {

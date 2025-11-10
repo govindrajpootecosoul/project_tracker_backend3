@@ -13,7 +13,7 @@ import commentRoutes from './routes/comments';
 import aiRoutes from './routes/ai';
 import activityRoutes from './routes/activities';
 
-dotenv.config();
+dotenv.config();              
 
 const app = express();
 const PORT = process.env.PORT || 3001;

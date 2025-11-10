@@ -104,5 +104,3 @@ class MicrosoftGraphClient {
 
 export const microsoftGraphClient = new MicrosoftGraphClient()
 
-
-

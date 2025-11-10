@@ -1,5 +1,5 @@
 import { Router, Response } from 'express'
-import { prisma } from '../../lib/prisma'
+import { prisma } from '../lib/prisma'
 import { authMiddleware, AuthRequest } from '../middleware/auth'
 
 const router = Router()
@@ -125,5 +125,6 @@ export const createNotification = async (
 }
 
 export default router
+
 
 

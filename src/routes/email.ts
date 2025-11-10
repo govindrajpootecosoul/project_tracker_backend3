@@ -1,7 +1,7 @@
 import { Router, Response } from 'express'
-import { prisma } from '../../lib/prisma'
+import { prisma } from '../lib/prisma'
 import { authMiddleware, AuthRequest } from '../middleware/auth'
-import { microsoftGraphClient } from '../../lib/microsoft-graph'
+import { microsoftGraphClient } from '../lib/microsoft-graph'
 import { logActivity } from '../utils/activityLogger'
 
 const router = Router()

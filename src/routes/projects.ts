@@ -1,5 +1,5 @@
 import { Router, Response } from 'express'
-import { prisma } from '../../lib/prisma'
+import { prisma } from '../lib/prisma'
 import { authMiddleware, AuthRequest } from '../middleware/auth'
 
 const router = Router()
@@ -13,11 +13,6 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       projects = await prisma.project.findMany({
         include: {
           members: {
-            where: {
-              user: {
-                isNot: null,
-              },
-            },
             include: {
               user: {
                 select: {
@@ -61,9 +56,6 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
             const members = await prisma.projectMember.findMany({
               where: {
                 projectId: project.id,
-                user: {
-                  isNot: null,
-                },
               },
               include: {
                 user: {
@@ -101,11 +93,6 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
         const projects = await prisma.project.findMany({
           include: {
             members: {
-              where: {
-                user: {
-                  isNot: null,
-                },
-              },
               select: {
                 id: true,
                 projectId: true,
