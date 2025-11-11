@@ -74,18 +74,11 @@ router.get('/my', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     const tasks = await prisma.task.findMany({
       where: {
-        OR: [
-          {
-            assignees: {
-              some: {
-                userId: req.userId,
-              },
-            },
+        assignees: {
+          some: {
+            userId: req.userId,
           },
-          {
-            createdById: req.userId,
-          },
-        ],
+        },
       },
       include: {
         assignees: {
