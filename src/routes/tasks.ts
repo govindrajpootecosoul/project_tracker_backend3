@@ -74,11 +74,18 @@ router.get('/my', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     const tasks = await prisma.task.findMany({
       where: {
-        assignees: {
-          some: {
-            userId: req.userId,
+        OR: [
+          {
+            assignees: {
+              some: {
+                userId: req.userId,
+              },
+            },
           },
-        },
+          {
+            createdById: req.userId,
+          },
+        ],
       },
       include: {
         assignees: {
@@ -319,6 +326,78 @@ router.get('/review', authMiddleware, async (req: AuthRequest, res: Response) =>
   }
 })
 
+// Get assignable members for task assignment (admin and super admin only)
+router.get('/assignable-members', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const { search } = req.query
+
+    // Get current user's role and department
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: {
+        role: true,
+        department: true,
+      },
+    })
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    const userRole = currentUser.role?.toLowerCase()
+    const isAdmin = userRole === 'admin'
+    const isSuperAdmin = userRole === 'superadmin'
+
+    // Only admin and super admin can assign tasks
+    if (!isAdmin && !isSuperAdmin) {
+      return res.status(403).json({ error: 'Only admins and super admins can assign tasks' })
+    }
+
+    // Build where condition
+    const where: any = {
+      isActive: true, // Only show active users
+    }
+
+    // Admin sees only their department members, super admin sees all
+    if (isAdmin && !isSuperAdmin && currentUser.department) {
+      where.department = currentUser.department
+    }
+    // Super admin sees all (no department filter)
+
+    // Get users
+    let users = await prisma.user.findMany({
+      where,
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        department: true,
+      },
+      orderBy: {
+        name: 'asc',
+      },
+    })
+
+    // Apply search filter if provided
+    if (search && typeof search === 'string') {
+      const searchLower = search.toLowerCase()
+      users = users.filter(user => 
+        user.name?.toLowerCase().includes(searchLower) ||
+        user.email.toLowerCase().includes(searchLower)
+      )
+    }
+
+    res.json(users)
+  } catch (error) {
+    console.error('Error fetching assignable members:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // Get task statistics
 router.get('/stats', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
@@ -328,11 +407,18 @@ router.get('/stats', authMiddleware, async (req: AuthRequest, res: Response) => 
 
     const tasks = await prisma.task.findMany({
       where: {
-        assignees: {
-          some: {
-            userId: req.userId,
+        OR: [
+          {
+            assignees: {
+              some: {
+                userId: req.userId,
+              },
+            },
           },
-        },
+          {
+            createdById: req.userId,
+          },
+        ],
       },
     })
 
@@ -535,7 +621,12 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
     // Get old task data for activity logging
     const oldTask = await prisma.task.findUnique({
       where: { id: req.params.id },
-      include: { project: { select: { name: true } } },
+      include: {
+        project: { select: { name: true } },
+        assignees: {
+          select: { userId: true },
+        },
+      },
     })
 
     if (!oldTask) {
@@ -580,15 +671,32 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
     })
 
     // Update assignees if provided
-    if (assignees && Array.isArray(assignees)) {
+    if (Array.isArray(assignees)) {
       await prisma.taskAssignee.deleteMany({
         where: { taskId: req.params.id },
       })
-      
-      // Only create assignees if the array is not empty
-      if (assignees.length > 0) {
+
+      const sanitizedAssignees = assignees
+        .flatMap((userId: unknown) => {
+          if (typeof userId !== 'string') return []
+          const trimmed = userId.trim()
+          return trimmed ? [trimmed] : []
+        })
+
+      const fallbackAssignees = oldTask.assignees?.map(a => a.userId) ?? []
+      const finalAssigneeIds = sanitizedAssignees.length > 0
+        ? sanitizedAssignees
+        : fallbackAssignees.length > 0
+          ? fallbackAssignees
+          : req.userId
+            ? [req.userId]
+            : []
+
+      const uniqueAssigneeIds = Array.from(new Set(finalAssigneeIds))
+
+      if (uniqueAssigneeIds.length > 0) {
         await prisma.taskAssignee.createMany({
-          data: assignees.map((userId: string) => ({
+          data: uniqueAssigneeIds.map(userId => ({
             taskId: req.params.id,
             userId,
           })),

@@ -458,9 +458,16 @@ router.post('/ai/query', authMiddleware, async (req: AuthRequest, res: Response)
         // Count tasks for this user
         const taskCount = await prisma.task.count({
           where: {
-            assignees: {
-              some: { userId: targetUserId },
-            },
+            OR: [
+              {
+                assignees: {
+                  some: { userId: targetUserId },
+                },
+              },
+              {
+                createdById: targetUserId,
+              },
+            ],
           },
         })
 
@@ -468,9 +475,16 @@ router.post('/ai/query', authMiddleware, async (req: AuthRequest, res: Response)
         const tasksByStatus = await prisma.task.groupBy({
           by: ['status'],
           where: {
-            assignees: {
-              some: { userId: targetUserId },
-            },
+            OR: [
+              {
+                assignees: {
+                  some: { userId: targetUserId },
+                },
+              },
+              {
+                createdById: targetUserId,
+              },
+            ],
           },
           _count: {
             id: true,
@@ -601,32 +615,60 @@ router.post('/ai/query', authMiddleware, async (req: AuthRequest, res: Response)
       const [totalTasks, completedTasks, inProgressTasks, overdueTasks, activeProjects, totalCredentials, activeSubscriptions] = await Promise.all([
         prisma.task.count({
           where: {
-            assignees: {
-              some: { userId: targetUserId || req.userId },
-            },
+            OR: [
+              {
+                assignees: {
+                  some: { userId: targetUserId || req.userId },
+                },
+              },
+              {
+                createdById: targetUserId || req.userId,
+              },
+            ],
           },
         }),
         prisma.task.count({
           where: {
-            assignees: {
-              some: { userId: targetUserId || req.userId },
-            },
+            OR: [
+              {
+                assignees: {
+                  some: { userId: targetUserId || req.userId },
+                },
+              },
+              {
+                createdById: targetUserId || req.userId,
+              },
+            ],
             status: 'COMPLETED',
           },
         }),
         prisma.task.count({
           where: {
-            assignees: {
-              some: { userId: targetUserId || req.userId },
-            },
+            OR: [
+              {
+                assignees: {
+                  some: { userId: targetUserId || req.userId },
+                },
+              },
+              {
+                createdById: targetUserId || req.userId,
+              },
+            ],
             status: 'IN_PROGRESS',
           },
         }),
         prisma.task.count({
           where: {
-            assignees: {
-              some: { userId: targetUserId || req.userId },
-            },
+            OR: [
+              {
+                assignees: {
+                  some: { userId: targetUserId || req.userId },
+                },
+              },
+              {
+                createdById: targetUserId || req.userId,
+              },
+            ],
             status: { not: 'COMPLETED' },
             dueDate: { lt: new Date() },
           },
@@ -919,19 +961,33 @@ router.post('/ai/query', authMiddleware, async (req: AuthRequest, res: Response)
 
     // Apply user filter first
     if (targetUserId) {
-      // Tasks assigned to specific user
-      whereCondition.assignees = {
-        some: {
-          userId: targetUserId,
+      // Tasks assigned to or created by specific user
+      whereCondition.OR = [
+        {
+          assignees: {
+            some: {
+              userId: targetUserId,
+            },
+          },
         },
-      }
+        {
+          createdById: targetUserId,
+        },
+      ]
     } else if (!isAdmin) {
-      // Non-admin users can only see their own tasks
-      whereCondition.assignees = {
-        some: {
-          userId: req.userId,
+      // Non-admin users can only see their own tasks (assigned or created)
+      whereCondition.OR = [
+        {
+          assignees: {
+            some: {
+              userId: req.userId,
+            },
+          },
         },
-      }
+        {
+          createdById: req.userId,
+        },
+      ]
     }
 
     // Apply status filter (works together with user filter)

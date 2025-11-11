@@ -114,15 +114,28 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
       // Fetch only user's own tasks with status "IN_PROGRESS" or recurring
       tasks = await prisma.task.findMany({
         where: {
-          OR: [
-            { status: 'IN_PROGRESS' },
-            { recurring: { not: null } },
-          ],
-          assignees: {
-            some: {
-              userId: req.userId,
+          AND: [
+            {
+              OR: [
+                { status: 'IN_PROGRESS' },
+                { recurring: { not: null } },
+              ],
             },
-          },
+            {
+              OR: [
+                {
+                  assignees: {
+                    some: {
+                      userId: req.userId,
+                    },
+                  },
+                },
+                {
+                  createdById: req.userId,
+                },
+              ],
+            },
+          ],
         },
         include: {
           assignees: {

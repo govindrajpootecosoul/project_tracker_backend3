@@ -28,11 +28,12 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
     const projectIds = userProjects.map(p => p.projectId)
     console.log('User project IDs:', projectIds)
 
-    // Get tasks assigned to user or in user's projects
+    // Get tasks assigned to user, created by user, or in user's projects
     const userTasks = await prisma.task.findMany({
       where: {
         OR: [
           { assignees: { some: { userId: req.userId } } },
+          { createdById: req.userId },
           { projectId: { in: projectIds } },
         ],
       },
