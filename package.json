@@ -5,13 +5,14 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "prisma generate && tsc",
+    "build": "npm run clean:prisma && prisma generate && tsc",
     "start": "node dist/server.js",
     "lint": "eslint src --ext .ts",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
+    "clean:prisma": "rimraf node_modules/.prisma",
     "backfill:assignees": "tsx src/scripts/backfill-task-assignees.ts"
   },
   "keywords": [],
@@ -37,6 +38,7 @@
     "@typescript-eslint/eslint-plugin": "^6.15.0",
     "@typescript-eslint/parser": "^6.15.0",
     "eslint": "^8.56.0",
+    "rimraf": "^5.0.10",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3"
   }

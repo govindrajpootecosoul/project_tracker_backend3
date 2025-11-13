@@ -17,8 +17,8 @@ import { backfillTaskAssignees } from './scripts/backfill-task-assignees';
 dotenv.config();              
 
 const app = express();
-//const PORT = process.env.PORT || 3001;
-const PORT = process.env.PORT || 6000;
+const PORT = process.env.PORT || 3001;
+//const PORT = process.env.PORT || 6000;
 
 // Middleware
 // Allow both local and production frontend origins
