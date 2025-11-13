@@ -4,6 +4,25 @@ import { authMiddleware, AuthRequest } from '../middleware/auth'
 
 const router = Router()
 
+const mapRoleToEnum = (role?: string | null) => {
+  if (!role) return 'USER'
+  const normalized = role.toLowerCase()
+  const mapping: Record<string, string> = {
+    user: 'USER',
+    admin: 'ADMIN',
+    superadmin: 'SUPER_ADMIN',
+  }
+  return mapping[normalized] || role.toUpperCase()
+}
+
+const normalizeRoleInput = (role?: string | null) => {
+  if (!role) return null
+  const trimmed = role.trim().toLowerCase()
+  if (trimmed === 'super_admin') return 'superadmin'
+  if (trimmed === 'super-admin') return 'superadmin'
+  return trimmed
+}
+
 // Get all users (for search and filtering)
 router.get('/users', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
@@ -57,6 +76,7 @@ router.get('/users', authMiddleware, async (req: AuthRequest, res: Response) => 
         name: true,
         email: true,
         department: true,
+        role: true,
       },
       orderBy: {
         name: 'asc',
@@ -168,6 +188,7 @@ router.get('/members', authMiddleware, async (req: AuthRequest, res: Response) =
         name: true,
         email: true,
         department: true,
+        role: true,
       },
       orderBy: {
         name: 'asc',
@@ -248,6 +269,7 @@ router.get('/members', authMiddleware, async (req: AuthRequest, res: Response) =
           name: user?.name,
           email: user?.email,
           department: user?.department,
+          role: mapRoleToEnum(user?.role),
           tasksAssigned: tasks.length,
           projectsInvolved: projects.length,
           hasCredentialAccess: userData?.hasCredentialAccess || false,
@@ -322,6 +344,124 @@ router.put('/members/:userId/features', authMiddleware, async (req: AuthRequest,
     res.json(updatedUser)
   } catch (error) {
     console.error('Error updating user features:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Update user role (admin/super admin only)
+router.put('/members/:userId/role', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { role: true },
+    })
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    const currentUserRole = currentUser.role?.toLowerCase()
+    const allowedRoles = ['user', 'admin', 'superadmin']
+    if (currentUserRole !== 'admin' && currentUserRole !== 'superadmin') {
+      return res.status(403).json({ error: 'Only admins can update roles' })
+    }
+
+    const { role } = req.body as { role?: string }
+    const normalizedRole = normalizeRoleInput(role)
+
+    if (!normalizedRole || !allowedRoles.includes(normalizedRole)) {
+      return res.status(400).json({ error: 'Invalid role. Allowed roles are USER, ADMIN, SUPER_ADMIN.' })
+    }
+
+    if (normalizedRole === 'superadmin' && currentUserRole !== 'superadmin') {
+      return res.status(403).json({ error: 'Only super admins can assign the SUPER_ADMIN role' })
+    }
+
+    const targetUser = await prisma.user.findUnique({
+      where: { id: req.params.userId },
+      select: { id: true, role: true, email: true, name: true, department: true },
+    })
+
+    if (!targetUser) {
+      return res.status(404).json({ error: 'Target user not found' })
+    }
+
+    if (targetUser.role?.toLowerCase() === 'superadmin' && currentUserRole !== 'superadmin') {
+      return res.status(403).json({ error: 'Only super admins can modify another super admin' })
+    }
+
+    const updatedUser = await prisma.user.update({
+      where: { id: req.params.userId },
+      data: { role: normalizedRole },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        department: true,
+        role: true,
+      },
+    })
+
+    res.json({
+      ...updatedUser,
+      role: mapRoleToEnum(updatedUser.role),
+    })
+  } catch (error) {
+    console.error('Error updating user role:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Deactivate user (admin/super admin only)
+router.delete('/members/:userId', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { role: true },
+    })
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    const currentUserRole = currentUser.role?.toLowerCase()
+    if (currentUserRole !== 'admin' && currentUserRole !== 'superadmin') {
+      return res.status(403).json({ error: 'Only admins can deactivate members' })
+    }
+
+    const targetUser = await prisma.user.findUnique({
+      where: { id: req.params.userId },
+      select: { id: true, role: true },
+    })
+
+    if (!targetUser) {
+      return res.status(404).json({ error: 'Target user not found' })
+    }
+
+    if (targetUser.id === req.userId) {
+      return res.status(400).json({ error: 'You cannot deactivate your own account' })
+    }
+
+    if (targetUser.role?.toLowerCase() === 'superadmin' && currentUserRole !== 'superadmin') {
+      return res.status(403).json({ error: 'Only super admins can deactivate another super admin' })
+    }
+
+    await prisma.user.update({
+      where: { id: req.params.userId },
+      data: { isActive: false },
+    })
+
+    res.json({ success: true })
+  } catch (error) {
+    console.error('Error deactivating user:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

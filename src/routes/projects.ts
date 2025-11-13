@@ -6,11 +6,50 @@ const router = Router()
 
 // Get all projects
 router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
+  if (!req.userId) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+
+  const currentUser = await prisma.user.findUnique({
+    where: { id: req.userId },
+    select: {
+      role: true,
+      department: true,
+    },
+  })
+
+  if (!currentUser) {
+    return res.status(404).json({ error: 'User not found' })
+  }
+
+  const isSuperAdmin = currentUser.role?.toLowerCase() === 'superadmin'
+  let whereClause: Record<string, unknown> | undefined = undefined
+
+  if (!isSuperAdmin) {
+    const orConditions: Record<string, unknown>[] = []
+    if (currentUser.department) {
+      orConditions.push({ department: currentUser.department })
+    }
+    orConditions.push({
+      members: {
+        some: {
+          userId: req.userId,
+        },
+      },
+    })
+    if (orConditions.length === 1) {
+      whereClause = orConditions[0]
+    } else if (orConditions.length > 1) {
+      whereClause = { OR: orConditions }
+    }
+  }
+
   try {
     // Try the full query first
     let projects
     try {
       projects = await prisma.project.findMany({
+        where: whereClause,
         include: {
           members: {
             include: {
@@ -37,6 +76,7 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       // If the query fails, try a simpler version
       console.warn('Full query failed, trying simpler query:', queryError.message)
       projects = await prisma.project.findMany({
+        where: whereClause,
         include: {
           _count: {
             select: {
@@ -91,6 +131,7 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
     if (error.message?.includes('Inconsistent query result') || error.message?.includes('Field user is required')) {
       try {
         const projects = await prisma.project.findMany({
+          where: whereClause,
           include: {
             members: {
               select: {
@@ -170,6 +211,22 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
 // Get single project
 router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: {
+        role: true,
+        department: true,
+      },
+    })
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
     const project = await prisma.project.findUnique({
       where: { id: req.params.id },
       include: {
@@ -209,6 +266,17 @@ router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     if (!project) {
       return res.status(404).json({ error: 'Project not found' })
+    }
+
+    const isSuperAdmin = currentUser.role?.toLowerCase() === 'superadmin'
+    const isMember = project.members.some((member) => member.userId === req.userId)
+    const hasDepartmentAccess =
+      !!currentUser.department &&
+      !!project.department &&
+      currentUser.department === project.department
+
+    if (!isSuperAdmin && !isMember && !hasDepartmentAccess) {
+      return res.status(403).json({ error: 'You do not have access to this project' })
     }
 
     // Filter out members with null users (orphaned records)
@@ -257,6 +325,8 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
         brand: brand || null,
         company: company || null,
         status: status || 'ACTIVE',
+        department: user.department || null,
+        createdById: req.userId,
         members: {
           create: {
             userId: req.userId,

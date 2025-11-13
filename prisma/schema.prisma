@@ -50,6 +50,7 @@ model User {
   credentialMembers  CredentialMember[]
   subscriptionsCreated Subscription[] @relation("SubscriptionCreator")
   subscriptionMembers SubscriptionMember[]
+  projectsCreated Project[] @relation("ProjectCreator")
   
   @@map("users")
 }
@@ -107,13 +108,16 @@ model Project {
   description String?
   brand       String?
   company     String?
+  department  String?
   status      ProjectStatus @default(ACTIVE)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  createdById String?  @db.ObjectId
   
   // Relations
   tasks       Task[]
   members     ProjectMember[]
+  createdBy   User?    @relation("ProjectCreator", fields: [createdById], references: [id], onDelete: SetNull)
   
   @@map("projects")
 }

@@ -44,6 +44,12 @@ router.post('/tasks/:taskId/comments', authMiddleware, async (req: AuthRequest, 
       return res.status(400).json({ error: 'Comment content is required' })
     }
 
+    // Get current user info for notifications
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { name: true, email: true },
+    })
+
     const comment = await prisma.comment.create({
       data: {
         content: content.trim(),
@@ -62,13 +68,34 @@ router.post('/tasks/:taskId/comments', authMiddleware, async (req: AuthRequest, 
       },
     })
 
-    // Create notifications for mentioned users
-    if (mentions && Array.isArray(mentions) && mentions.length > 0) {
-      const task = await prisma.task.findUnique({
-        where: { id: req.params.taskId },
-        select: { title: true },
-      })
+    // Get task info
+    const task = await prisma.task.findUnique({
+      where: { id: req.params.taskId },
+      select: { title: true },
+    })
 
+    // Get all previously mentioned users in this task (to notify them of new comments)
+    const previousComments = await prisma.comment.findMany({
+      where: { taskId: req.params.taskId },
+      select: { mentions: true },
+    })
+
+    const allPreviouslyMentionedUserIds = new Set<string>()
+    previousComments.forEach((prevComment) => {
+      if (prevComment.mentions) {
+        try {
+          const mentionedIds = JSON.parse(prevComment.mentions) as string[]
+          mentionedIds.forEach((id) => allPreviouslyMentionedUserIds.add(id))
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+    })
+
+    // Create notifications for newly mentioned users
+    if (mentions && Array.isArray(mentions) && mentions.length > 0) {
+      const commenterName = currentUser?.name || currentUser?.email || 'Someone'
+      
       await Promise.all(
         mentions.map((userId: string) =>
           prisma.notification.create({
@@ -76,7 +103,31 @@ router.post('/tasks/:taskId/comments', authMiddleware, async (req: AuthRequest, 
               userId,
               type: 'COMMENT',
               title: 'You were mentioned in a comment',
-              message: `${req.userId} mentioned you in a comment on task: ${task?.title || 'Task'}`,
+              message: `${commenterName} mentioned you in a comment on task: ${task?.title || 'Task'}`,
+              link: `/tasks/${req.params.taskId}`,
+            },
+          })
+        )
+      )
+    }
+
+    // Notify previously mentioned users about the new comment (reply notification)
+    // Exclude current user and newly mentioned users (they already got notified above)
+    const usersToNotify = Array.from(allPreviouslyMentionedUserIds).filter(
+      (userId) => userId !== req.userId && (!mentions || !mentions.includes(userId))
+    )
+
+    if (usersToNotify.length > 0) {
+      const commenterName = currentUser?.name || currentUser?.email || 'Someone'
+      
+      await Promise.all(
+        usersToNotify.map((userId: string) =>
+          prisma.notification.create({
+            data: {
+              userId,
+              type: 'COMMENT',
+              title: 'New reply on task',
+              message: `${commenterName} added a new comment on task: ${task?.title || 'Task'}`,
               link: `/tasks/${req.params.taskId}`,
             },
           })

@@ -65,7 +65,7 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
   }
 })
 
-// Get user's tasks
+// Get user's tasks (only assigned tasks)
 router.get('/my', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     if (!req.userId) {
@@ -132,6 +132,206 @@ router.get('/my', authMiddleware, async (req: AuthRequest, res: Response) => {
     res.json(tasks)
   } catch (error) {
     console.error('Error fetching my tasks:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get department tasks (for admin - tasks from users in same department)
+router.get('/department', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    // Get current user's role and department
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: {
+        role: true,
+        department: true,
+      },
+    })
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    const userRole = currentUser.role?.toLowerCase()
+    const isAdmin = userRole === 'admin'
+    const isSuperAdmin = userRole === 'superadmin'
+
+    // Only admin and super admin can access department tasks
+    if (!isAdmin && !isSuperAdmin) {
+      return res.status(403).json({ error: 'Only admins can access department tasks' })
+    }
+
+    if (!currentUser.department) {
+      return res.status(400).json({ error: 'User does not have a department assigned' })
+    }
+
+    // Get all users in the same department
+    const departmentUsers = await prisma.user.findMany({
+      where: {
+        department: currentUser.department,
+        isActive: true,
+      },
+      select: {
+        id: true,
+      },
+    })
+
+    const departmentUserIds = departmentUsers.map(u => u.id)
+
+    // Get tasks assigned to department users
+    const tasks = await prisma.task.findMany({
+      where: {
+        assignees: {
+          some: {
+            userId: {
+              in: departmentUserIds,
+            },
+          },
+        },
+      },
+      include: {
+        assignees: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                department: true,
+              },
+            },
+          },
+        },
+        createdBy: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
+        project: true,
+        reviewRequestedBy: {
+          select: { id: true, name: true, email: true },
+        },
+        reviewer: {
+          select: { id: true, name: true, email: true },
+        },
+        reviewedBy: {
+          select: { id: true, name: true, email: true },
+        },
+        comments: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+          },
+          orderBy: {
+            createdAt: 'desc',
+          },
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    })
+
+    res.json(tasks)
+  } catch (error) {
+    console.error('Error fetching department tasks:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get all departments tasks (for super admin - tasks from all departments)
+router.get('/all-departments', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    // Get current user's role
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: {
+        role: true,
+      },
+    })
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    const userRole = currentUser.role?.toLowerCase()
+    const isSuperAdmin = userRole === 'superadmin'
+
+    // Only super admin can access all departments tasks
+    if (!isSuperAdmin) {
+      return res.status(403).json({ error: 'Only super admins can access all departments tasks' })
+    }
+
+    // Get all tasks from all departments
+    const tasks = await prisma.task.findMany({
+      include: {
+        assignees: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                department: true,
+              },
+            },
+          },
+        },
+        createdBy: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
+        project: true,
+        reviewRequestedBy: {
+          select: { id: true, name: true, email: true },
+        },
+        reviewer: {
+          select: { id: true, name: true, email: true },
+        },
+        reviewedBy: {
+          select: { id: true, name: true, email: true },
+        },
+        comments: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+          },
+          orderBy: {
+            createdAt: 'desc',
+          },
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    })
+
+    res.json(tasks)
+  } catch (error) {
+    console.error('Error fetching all departments tasks:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -398,22 +598,95 @@ router.get('/stats', authMiddleware, async (req: AuthRequest, res: Response) => 
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const tasks = await prisma.task.findMany({
-      where: {
-        OR: [
-          {
-            assignees: {
-              some: {
-                userId: req.userId,
+    // Get view parameter (my/department/all-departments)
+    const view = req.query.view as string || 'my'
+
+    // Get current user's role and department
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: {
+        role: true,
+        department: true,
+      },
+    })
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    const userRole = currentUser.role?.toLowerCase()
+    const isAdmin = userRole === 'admin'
+    const isSuperAdmin = userRole === 'superadmin'
+
+    let tasks: any[] = []
+
+    // Determine which tasks to fetch based on view
+    if (view === 'my') {
+      // My tasks - only tasks assigned to the user
+      tasks = await prisma.task.findMany({
+        where: {
+          assignees: {
+            some: {
+              userId: req.userId,
+            },
+          },
+        },
+      })
+    } else if (view === 'department') {
+      // Department tasks - only for admin/super admin
+      if (!isAdmin && !isSuperAdmin) {
+        return res.status(403).json({ error: 'Only admins can access department tasks' })
+      }
+
+      if (!currentUser.department) {
+        return res.status(400).json({ error: 'User does not have a department assigned' })
+      }
+
+      // Get all users in the same department
+      const departmentUsers = await prisma.user.findMany({
+        where: {
+          department: currentUser.department,
+          isActive: true,
+        },
+        select: {
+          id: true,
+        },
+      })
+
+      const departmentUserIds = departmentUsers.map(u => u.id)
+
+      // Get tasks assigned to department users
+      tasks = await prisma.task.findMany({
+        where: {
+          assignees: {
+            some: {
+              userId: {
+                in: departmentUserIds,
               },
             },
           },
-          {
-            createdById: req.userId,
+        },
+      })
+    } else if (view === 'all-departments') {
+      // All departments tasks - only for super admin
+      if (!isSuperAdmin) {
+        return res.status(403).json({ error: 'Only super admins can access all departments tasks' })
+      }
+
+      // Get all tasks
+      tasks = await prisma.task.findMany({})
+    } else {
+      // Default to my tasks if invalid view - only assigned tasks
+      tasks = await prisma.task.findMany({
+        where: {
+          assignees: {
+            some: {
+              userId: req.userId,
+            },
           },
-        ],
-      },
-    })
+        },
+      })
+    }
 
     // Helper function to normalize status for comparison
     const normalizeStatus = (status: string | null | undefined): string => {

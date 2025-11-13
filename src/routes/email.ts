@@ -13,18 +13,32 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const { to, cc, subject, body, includeDepartmentTasks } = req.body
+    const { to, cc, subject, body, includeDepartmentTasks, onLeaveMemberIds } = req.body
+
+    // Get current user for department info
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { department: true, name: true, email: true },
+    })
 
     // Validate required fields - check for empty strings as well
     if (!to || (typeof to === 'string' && !to.trim())) {
       return res.status(400).json({ error: 'To field is required' })
     }
-    if (!subject || (typeof subject === 'string' && !subject.trim())) {
+    
+    // Auto-generate subject if includeDepartmentTasks is true
+    let finalSubject = subject
+    if (includeDepartmentTasks && currentUser?.department) {
+      // Subject will be generated after fetching tasks
+      // Format: "{Department Name} In-Progress Tasks Report - {X} Employees, {Y} Tasks"
+      // Allow empty subject in this case - it will be auto-generated
+    } else if (!subject || (typeof subject === 'string' && !subject.trim())) {
       return res.status(400).json({ error: 'Subject is required' })
+    } else {
+      finalSubject = subject.trim()
     }
-    if (!body || (typeof body === 'string' && !body.trim())) {
-      return res.status(400).json({ error: 'Body is required' })
-    }
+    
+    // Body is optional now - tasks will be added to email body automatically
 
     // Ensure to is an array and filter out empty strings
     const toArray = Array.isArray(to) 
@@ -46,30 +60,26 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
     let tasks: any[] = []
     
     if (includeDepartmentTasks) {
-      // Get logged-in user's department
-      const currentUser = await prisma.user.findUnique({
-        where: { id: req.userId },
-        select: { department: true },
-      })
-
       if (currentUser?.department) {
         // Get all users in the same department
         const departmentUsers = await prisma.user.findMany({
           where: {
             department: currentUser.department,
+            isActive: true,
           },
-          select: { id: true },
+          select: { 
+            id: true,
+            name: true,
+            email: true,
+          },
         })
 
         const departmentUserIds = departmentUsers.map(u => u.id)
 
-        // Fetch tasks from department members with status "IN_PROGRESS" or recurring
+        // Fetch only IN_PROGRESS tasks from department members
         tasks = await prisma.task.findMany({
           where: {
-            OR: [
-              { status: 'IN_PROGRESS' },
-              { recurring: { not: null } },
-            ],
+            status: 'IN_PROGRESS',
             assignees: {
               some: {
                 userId: {
@@ -97,45 +107,23 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
                 name: true,
               },
             },
-            createdBy: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
           },
+          // brand is a scalar field, automatically included
           orderBy: {
             createdAt: 'desc',
           },
         })
       }
     } else {
-      // Fetch only user's own tasks with status "IN_PROGRESS" or recurring
+      // Fetch only user's own IN_PROGRESS tasks
       tasks = await prisma.task.findMany({
         where: {
-          AND: [
-            {
-              OR: [
-                { status: 'IN_PROGRESS' },
-                { recurring: { not: null } },
-              ],
+          status: 'IN_PROGRESS',
+          assignees: {
+            some: {
+              userId: req.userId,
             },
-            {
-              OR: [
-                {
-                  assignees: {
-                    some: {
-                      userId: req.userId,
-                    },
-                  },
-                },
-                {
-                  createdById: req.userId,
-                },
-              ],
-            },
-          ],
+          },
         },
         include: {
           assignees: {
@@ -155,13 +143,7 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
               name: true,
             },
           },
-          createdBy: {
-            select: {
-              id: true,
-              name: true,
-              email: true,
-            },
-          },
+          // brand is a scalar field, automatically included
         },
         orderBy: {
           createdAt: 'desc',
@@ -180,61 +162,198 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
         .replace(/'/g, '&#039;')
     }
 
-    // Generate HTML table for tasks
-    let tasksTableHTML = ''
-    if (tasks.length > 0) {
-      const tableRows = tasks.map((task: any, index: number) => {
-        const assignees = task.assignees.map((a: any) => a.user.name || a.user.email).join(', ')
-        const dueDate = task.dueDate ? new Date(task.dueDate).toLocaleDateString() : 'N/A'
-        const recurring = task.recurring || 'N/A'
-        const projectName = task.project?.name || 'N/A'
-        const rowColor = index % 2 === 0 ? '#f9f9f9' : '#ffffff'
-        
-        return `
-          <tr style="background-color: ${rowColor};">
-            <td style="padding: 8px;">${escapeHtml(task.title)}</td>
-            <td style="padding: 8px;">${escapeHtml(task.status)}</td>
-            <td style="padding: 8px;">${escapeHtml(task.priority)}</td>
-            <td style="padding: 8px;">${escapeHtml(recurring)}</td>
-            <td style="padding: 8px;">${escapeHtml(projectName)}</td>
-            <td style="padding: 8px;">${escapeHtml(dueDate)}</td>
-            <td style="padding: 8px;">${escapeHtml(assignees)}</td>
-          </tr>
-        `
-      }).join('')
+    // Format date
+    const formatDate = (date: string | Date | null | undefined): string => {
+      if (!date) return 'N/A'
+      try {
+        const d = new Date(date)
+        return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+      } catch {
+        return 'N/A'
+      }
+    }
 
-      const tableTitle = includeDepartmentTasks 
-        ? 'Department Tasks Summary (IN_PROGRESS & RECURRING)'
-        : 'My Tasks Summary (IN_PROGRESS & RECURRING)'
+    // Generate HTML for tasks report (same format for both department and non-department)
+    let tasksReportHTML = ''
+    
+    // For department tasks, include ALL department members (even with 0 tasks)
+    let allDepartmentMembers: any[] = []
+    if (includeDepartmentTasks && currentUser?.department) {
+      // Get all department members (already fetched earlier)
+      allDepartmentMembers = await prisma.user.findMany({
+        where: {
+          department: currentUser.department,
+          isActive: true,
+        },
+        select: { 
+          id: true,
+          name: true,
+          email: true,
+          department: true,
+        },
+      })
+    }
+    
+    // Group tasks by employee for consistent format
+    const tasksByEmployee = new Map<string, { user: any; tasks: any[] }>()
+    
+    // First, add all department members (if includeDepartmentTasks is true)
+    if (includeDepartmentTasks && allDepartmentMembers.length > 0) {
+      allDepartmentMembers.forEach((member: any) => {
+        tasksByEmployee.set(member.id, {
+          user: member,
+          tasks: []
+        })
+      })
+    }
+    
+    // Then, add tasks to their respective employees
+    if (tasks.length > 0) {
+      tasks.forEach((task: any) => {
+        task.assignees.forEach((assignee: any) => {
+          const userId = assignee.user.id
+          
+          if (!tasksByEmployee.has(userId)) {
+            tasksByEmployee.set(userId, {
+              user: assignee.user,
+              tasks: []
+            })
+          }
+          
+          // Only add task once per employee (avoid duplicates if multiple assignees)
+          const employeeData = tasksByEmployee.get(userId)!
+          if (!employeeData.tasks.find(t => t.id === task.id)) {
+            employeeData.tasks.push(task)
+          }
+        })
+      })
+    }
+
+    // Total employees should be all department members (if includeDepartmentTasks), otherwise just those with tasks
+    const totalEmployees = includeDepartmentTasks && allDepartmentMembers.length > 0 
+      ? allDepartmentMembers.length 
+      : tasksByEmployee.size
+    const totalTasks = tasks.length
+
+    // Generate subject based on includeDepartmentTasks
+    if (includeDepartmentTasks && currentUser?.department) {
+      // Department tasks - include employee count
+      if (totalTasks > 0) {
+        finalSubject = `${currentUser.department} In-Progress Tasks Report - ${totalEmployees} Employee${totalEmployees !== 1 ? 's' : ''}, ${totalTasks} Task${totalTasks !== 1 ? 's' : ''}`
+      } else {
+        finalSubject = `${currentUser.department} In-Progress Tasks Report - 0 Employees, 0 Tasks`
+      }
+    } else if (!includeDepartmentTasks && currentUser?.department) {
+      // Non-department tasks - only task count (no employee count)
+      finalSubject = `${currentUser.department} In-Progress Tasks Report - ${totalTasks} Task${totalTasks !== 1 ? 's' : ''}`
+    }
+
+    // Generate report HTML (same format for both cases)
+    if (tasks.length === 0) {
+      // If no tasks, show empty report
+      tasksReportHTML = `
+        <div style="background-color: #006ba6; color: white; padding: 20px; text-align: center; margin-bottom: 20px;">
+          <h2 style="margin: 0; font-family: Arial, sans-serif; font-size: 24px;">In-Progress Tasks Report</h2>
+        </div>
+        <div style="margin-bottom: 20px; font-family: Arial, sans-serif;">
+          <p style="font-size: 14px; color: #333;">
+            ${includeDepartmentTasks ? `<strong>Total Employees:</strong> 0<br>` : ''}
+            <strong>Total Tasks:</strong> 0
+          </p>
+          <p style="font-size: 14px; color: #666; margin-top: 10px;">
+            No in-progress tasks found.
+          </p>
+        </div>
+      `
+    } else {
+      // Generate report content for all employees (same format)
+      let reportContent = ''
       
-      tasksTableHTML = `
-        <br><br>
-        <h3 style="color: #333; font-family: Arial, sans-serif;">${tableTitle}</h3>
-        <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; font-size: 14px;">
-          <thead>
-            <tr style="background-color: #4CAF50; color: white;">
-              <th style="text-align: left; padding: 10px;">Title</th>
-              <th style="text-align: left; padding: 10px;">Status</th>
-              <th style="text-align: left; padding: 10px;">Priority</th>
-              <th style="text-align: left; padding: 10px;">Recurring</th>
-              <th style="text-align: left; padding: 10px;">Project</th>
-              <th style="text-align: left; padding: 10px;">Due Date</th>
-              <th style="text-align: left; padding: 10px;">Assignees</th>
+      // Sort employees by name for consistent ordering
+      const sortedEmployees = Array.from(tasksByEmployee.values()).sort((a, b) => {
+        const nameA = (a.user.name || a.user.email || '').toLowerCase()
+        const nameB = (b.user.name || b.user.email || '').toLowerCase()
+        return nameA.localeCompare(nameB)
+      })
+      
+      sortedEmployees.forEach((employeeData) => {
+        const { user, tasks: employeeTasks } = employeeData
+        const userName = user.name || 'Unknown'
+        const userEmail = user.email || 'N/A'
+        
+        // Check if this employee is on leave
+        const isOnLeave = includeDepartmentTasks && onLeaveMemberIds && Array.isArray(onLeaveMemberIds) && onLeaveMemberIds.includes(user.id)
+        
+        const taskRows = !isOnLeave && employeeTasks.length > 0 ? employeeTasks.map((task: any, index: number) => {
+          const rowColor = index % 2 === 0 ? '#f9f9f9' : '#ffffff'
+          const brand = escapeHtml(task.brand || 'N/A')
+          const projectName = escapeHtml(task.project?.name || 'N/A')
+          const taskTitle = escapeHtml(task.title)
+          const priority = escapeHtml(task.priority || 'N/A')
+          const dueDate = formatDate(task.dueDate)
+          
+          return `
+            <tr style="background-color: ${rowColor};">
+              <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${brand}</td>
+              <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${projectName}</td>
+              <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${taskTitle}</td>
+              <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${priority}</td>
+              <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${dueDate}</td>
             </tr>
-          </thead>
-          <tbody>
-            ${tableRows}
-          </tbody>
-        </table>
+          `
+        }).join('') : isOnLeave 
+          ? '<tr><td colspan="5" style="padding: 8px; border: 1px solid #ddd; text-align: center; color: #ff0000; font-weight: bold;">On Leave</td></tr>'
+          : '<tr><td colspan="5" style="padding: 8px; border: 1px solid #ddd; text-align: center; color: #666; font-style: italic;">No tasks assigned</td></tr>'
+
+        reportContent += `
+          <div style="margin-bottom: 30px; border-left: 5px solid #006ba6; padding-left: 15px;">
+            <h3 style="color: #b1740f; font-family: Arial, sans-serif; font-size: 16px; margin-bottom: 10px; font-weight: bold;">
+              ${escapeHtml(userName)} (${escapeHtml(userEmail)})${isOnLeave ? ' - <span style="color: #ff0000;">On Leave</span>' : ''}
+            </h3>
+            ${!isOnLeave ? `<p style="color: #666; font-family: Arial, sans-serif; font-size: 14px; margin-bottom: 10px;">
+              Total Tasks: ${employeeTasks.length}
+            </p>` : `<p style="color: #ff0000; font-family: Arial, sans-serif; font-size: 14px; margin-bottom: 10px; font-weight: bold;">
+              This team member is currently on leave.
+            </p>`}
+            <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; font-size: 14px; table-layout: fixed;">
+              <thead>
+                <tr style="background-color: #006ba6; color: white;">
+                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Brand</th>
+                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Project</th>
+                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Task Title</th>
+                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Priority</th>
+                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Due Date</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${taskRows}
+              </tbody>
+            </table>
+          </div>
+        `
+      })
+
+      tasksReportHTML = `
+        <div style="background-color: #006ba6; color: white; padding: 20px; text-align: center; margin-bottom: 20px;">
+          <h2 style="margin: 0; font-family: Arial, sans-serif; font-size: 24px;">In-Progress Tasks Report</h2>
+        </div>
+        <div style="margin-bottom: 20px; font-family: Arial, sans-serif;">
+          <p style="font-size: 14px; color: #333;">
+            ${includeDepartmentTasks ? `<strong>Total Employees:</strong> ${totalEmployees}<br>` : ''}
+            <strong>Total Tasks:</strong> ${totalTasks}
+          </p>
+        </div>
+        ${reportContent}
       `
     }
 
-    // Combine original body with tasks table
-    const emailBody = body + tasksTableHTML
+    // Combine original body with tasks report (tasks are part of body, not shown in UI)
+    // If body is empty, just use tasks report
+    const emailBody = (body && body.trim() ? body + tasksReportHTML : tasksReportHTML)
 
     // Send email via Microsoft Graph API
     try {
-      await microsoftGraphClient.sendEmail(toArray, ccArray, subject, emailBody)
+      await microsoftGraphClient.sendEmail(toArray, ccArray, finalSubject, emailBody)
     } catch (emailError: any) {
       console.error('Error sending email via Microsoft Graph:', emailError)
       // Log the error but still save to database
@@ -245,8 +364,8 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
       data: {
         to: JSON.stringify(toArray),
         cc: ccArray ? JSON.stringify(ccArray) : null,
-        subject,
-        body: body,
+        subject: finalSubject,
+        body: body, // Store original body without tasks (tasks are part of email body, not UI)
         userId: req.userId,
       },
     })
@@ -255,13 +374,14 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
     await logActivity({
       type: 'EMAIL_SENT',
       action: 'Email Sent',
-      description: `Sent email "${subject}" to ${toArray.join(', ')}${ccArray ? ` (CC: ${ccArray.join(', ')})` : ''}`,
+      description: `Sent email "${finalSubject}" to ${toArray.join(', ')}${ccArray ? ` (CC: ${ccArray.join(', ')})` : ''}`,
       entityType: 'email',
       entityId: emailLog.id,
       metadata: {
-        subject,
+        subject: finalSubject,
         to: toArray,
         cc: ccArray,
+        includeDepartmentTasks,
       },
       userId: req.userId,
     })
