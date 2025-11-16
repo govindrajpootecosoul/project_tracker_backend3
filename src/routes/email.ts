@@ -30,7 +30,7 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
     let finalSubject = subject
     if (includeDepartmentTasks && currentUser?.department) {
       // Subject will be generated after fetching tasks
-      // Format: "{Department Name} In-Progress Tasks Report - {X} Employees, {Y} Tasks"
+      // Format: "{Department Name} In-Progress & Recurring Tasks Report - {X} Employees, {Y} Tasks"
       // Allow empty subject in this case - it will be auto-generated
     } else if (!subject || (typeof subject === 'string' && !subject.trim())) {
       return res.status(400).json({ error: 'Subject is required' })
@@ -74,12 +74,14 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
           },
         })
 
-        const departmentUserIds = departmentUsers.map(u => u.id)
+        const departmentUserIds = departmentUsers.map((u: any) => u.id)
 
-        // Fetch only IN_PROGRESS tasks from department members
+        // Fetch IN_PROGRESS and RECURRING tasks from department members
         tasks = await prisma.task.findMany({
           where: {
-            status: 'IN_PROGRESS',
+            status: {
+              in: ['IN_PROGRESS', 'RECURRING'],
+            },
             assignees: {
               some: {
                 userId: {
@@ -115,10 +117,12 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
         })
       }
     } else {
-      // Fetch only user's own IN_PROGRESS tasks
+      // Fetch user's own IN_PROGRESS and RECURRING tasks
       tasks = await prisma.task.findMany({
         where: {
-          status: 'IN_PROGRESS',
+          status: {
+            in: ['IN_PROGRESS', 'RECURRING'],
+          },
           assignees: {
             some: {
               userId: req.userId,
@@ -239,13 +243,13 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
     if (includeDepartmentTasks && currentUser?.department) {
       // Department tasks - include employee count
       if (totalTasks > 0) {
-        finalSubject = `${currentUser.department} In-Progress Tasks Report - ${totalEmployees} Employee${totalEmployees !== 1 ? 's' : ''}, ${totalTasks} Task${totalTasks !== 1 ? 's' : ''}`
+        finalSubject = `${currentUser.department} In-Progress & Recurring Tasks Report - ${totalEmployees} Employee${totalEmployees !== 1 ? 's' : ''}, ${totalTasks} Task${totalTasks !== 1 ? 's' : ''}`
       } else {
-        finalSubject = `${currentUser.department} In-Progress Tasks Report - 0 Employees, 0 Tasks`
+        finalSubject = `${currentUser.department} In-Progress & Recurring Tasks Report - 0 Employees, 0 Tasks`
       }
     } else if (!includeDepartmentTasks && currentUser?.department) {
       // Non-department tasks - only task count (no employee count)
-      finalSubject = `${currentUser.department} In-Progress Tasks Report - ${totalTasks} Task${totalTasks !== 1 ? 's' : ''}`
+      finalSubject = `${currentUser.department} In-Progress & Recurring Tasks Report - ${totalTasks} Task${totalTasks !== 1 ? 's' : ''}`
     }
 
     // Generate report HTML (same format for both cases)
@@ -253,7 +257,7 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
       // If no tasks, show empty report
       tasksReportHTML = `
         <div style="background-color: #006ba6; color: white; padding: 20px; text-align: center; margin-bottom: 20px;">
-          <h2 style="margin: 0; font-family: Arial, sans-serif; font-size: 24px;">In-Progress Tasks Report</h2>
+          <h2 style="margin: 0; font-family: Arial, sans-serif; font-size: 24px;">In-Progress & Recurring Tasks Report</h2>
         </div>
         <div style="margin-bottom: 20px; font-family: Arial, sans-serif;">
           <p style="font-size: 14px; color: #333;">
@@ -261,7 +265,7 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
             <strong>Total Tasks:</strong> 0
           </p>
           <p style="font-size: 14px; color: #666; margin-top: 10px;">
-            No in-progress tasks found.
+            No in-progress or recurring tasks found.
           </p>
         </div>
       `
@@ -335,7 +339,7 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
 
       tasksReportHTML = `
         <div style="background-color: #006ba6; color: white; padding: 20px; text-align: center; margin-bottom: 20px;">
-          <h2 style="margin: 0; font-family: Arial, sans-serif; font-size: 24px;">In-Progress Tasks Report</h2>
+          <h2 style="margin: 0; font-family: Arial, sans-serif; font-size: 24px;">In-Progress & Recurring Tasks Report</h2>
         </div>
         <div style="margin-bottom: 20px; font-family: Arial, sans-serif;">
           <p style="font-size: 14px; color: #333;">
