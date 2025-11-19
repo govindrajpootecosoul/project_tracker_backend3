@@ -1,4 +1,5 @@
 import { Router, Response } from 'express'
+import bcrypt from 'bcryptjs'
 import { prisma } from '../lib/prisma'
 import { authMiddleware, AuthRequest } from '../middleware/auth'
 
@@ -22,6 +23,13 @@ const normalizeRoleInput = (role?: string | null) => {
   if (trimmed === 'super-admin') return 'superadmin'
   return trimmed
 }
+
+const normalizeEmailInput = (email?: string | null) => {
+  if (!email) return ''
+  return email.trim().toLowerCase()
+}
+
+const isSuperAdmin = (role?: string | null) => role?.toLowerCase() === 'superadmin'
 
 // Get all users (for search and filtering)
 router.get('/users', authMiddleware, async (req: AuthRequest, res: Response) => {
@@ -77,6 +85,8 @@ router.get('/users', authMiddleware, async (req: AuthRequest, res: Response) => 
         email: true,
         department: true,
         role: true,
+        company: true,
+        employeeId: true,
       },
       orderBy: {
         name: 'asc',
@@ -269,6 +279,8 @@ router.get('/members', authMiddleware, async (req: AuthRequest, res: Response) =
           name: user?.name,
           email: user?.email,
           department: user?.department,
+          company: user?.company,
+          employeeId: user?.employeeId,
           role: mapRoleToEnum(user?.role),
           tasksAssigned: tasks.length,
           projectsInvolved: projects.length,
@@ -303,6 +315,227 @@ router.get('/members', authMiddleware, async (req: AuthRequest, res: Response) =
     res.json(teamMembers)
   } catch (error) {
     console.error('Error fetching team members:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Create a new team member (super admin only)
+router.post('/members', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { role: true },
+    })
+
+    if (!currentUser || !isSuperAdmin(currentUser.role)) {
+      return res.status(403).json({ error: 'Only super admins can create members' })
+    }
+
+    const {
+      name,
+      email,
+      password,
+      department,
+      company,
+      employeeId,
+      role,
+      hasCredentialAccess,
+      hasSubscriptionAccess,
+    } = req.body
+
+    const normalizedEmail = normalizeEmailInput(email)
+
+    if (!normalizedEmail) {
+      return res.status(400).json({ error: 'A valid email address is required' })
+    }
+
+    if (!password || typeof password !== 'string' || password.trim().length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long' })
+    }
+
+    const normalizedRole = normalizeRoleInput(role) || 'user'
+    const allowedRoles = ['user', 'admin', 'superadmin']
+    if (!allowedRoles.includes(normalizedRole)) {
+      return res.status(400).json({ error: 'Invalid role. Allowed roles are USER, ADMIN, SUPER_ADMIN.' })
+    }
+
+    const existingUser = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+    })
+
+    if (existingUser) {
+      return res.status(400).json({ error: 'A user with this email already exists' })
+    }
+
+    const hashedPassword = await bcrypt.hash(password.trim(), 10)
+
+    const newUser = await prisma.user.create({
+      data: {
+        email: normalizedEmail,
+        password: hashedPassword,
+        name: name?.trim() || null,
+        department: department?.trim() || null,
+        company: company?.trim() || null,
+        employeeId: employeeId?.trim() || null,
+        role: normalizedRole,
+        hasCredentialAccess: Boolean(hasCredentialAccess),
+        hasSubscriptionAccess: Boolean(hasSubscriptionAccess),
+        isActive: true,
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        department: true,
+        company: true,
+        employeeId: true,
+        role: true,
+        hasCredentialAccess: true,
+        hasSubscriptionAccess: true,
+      },
+    })
+
+    res.status(201).json({
+      ...newUser,
+      role: mapRoleToEnum(newUser.role),
+    })
+  } catch (error) {
+    console.error('Error creating team member:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Update member details (super admin only)
+router.put('/members/:userId/details', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { role: true },
+    })
+
+    if (!currentUser || !isSuperAdmin(currentUser.role)) {
+      return res.status(403).json({ error: 'Only super admins can update member details' })
+    }
+
+    const targetUser = await prisma.user.findUnique({
+      where: { id: req.params.userId },
+      select: {
+        id: true,
+        role: true,
+        email: true,
+      },
+    })
+
+    if (!targetUser) {
+      return res.status(404).json({ error: 'Team member not found' })
+    }
+
+    const {
+      name,
+      email,
+      password,
+      department,
+      company,
+      employeeId,
+      role,
+      hasCredentialAccess,
+      hasSubscriptionAccess,
+    } = req.body
+
+    const updates: Record<string, any> = {}
+
+    if (name !== undefined) {
+      updates.name = name?.trim() || null
+    }
+    if (department !== undefined) {
+      updates.department = department?.trim() || null
+    }
+    if (company !== undefined) {
+      updates.company = company?.trim() || null
+    }
+    if (employeeId !== undefined) {
+      updates.employeeId = employeeId?.trim() || null
+    }
+
+    if (email !== undefined) {
+      const normalizedEmail = normalizeEmailInput(email)
+      if (!normalizedEmail) {
+        return res.status(400).json({ error: 'A valid email address is required' })
+      }
+
+      if (normalizedEmail !== targetUser.email) {
+        const emailExists = await prisma.user.findUnique({
+          where: { email: normalizedEmail },
+          select: { id: true },
+        })
+
+        if (emailExists && emailExists.id !== req.params.userId) {
+          return res.status(400).json({ error: 'Another user already uses this email' })
+        }
+      }
+
+      updates.email = normalizedEmail
+    }
+
+    if (password !== undefined) {
+      if (password && typeof password === 'string' && password.trim().length >= 6) {
+        updates.password = await bcrypt.hash(password.trim(), 10)
+      } else if (password) {
+        return res.status(400).json({ error: 'Password must be at least 6 characters long' })
+      }
+    }
+
+    if (role !== undefined) {
+      const normalizedRole = normalizeRoleInput(role)
+      const allowedRoles = ['user', 'admin', 'superadmin']
+      if (!normalizedRole || !allowedRoles.includes(normalizedRole)) {
+        return res.status(400).json({ error: 'Invalid role. Allowed roles are USER, ADMIN, SUPER_ADMIN.' })
+      }
+      updates.role = normalizedRole
+    }
+
+    if (hasCredentialAccess !== undefined) {
+      updates.hasCredentialAccess = Boolean(hasCredentialAccess)
+    }
+
+    if (hasSubscriptionAccess !== undefined) {
+      updates.hasSubscriptionAccess = Boolean(hasSubscriptionAccess)
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'No fields provided to update' })
+    }
+
+    const updatedUser = await prisma.user.update({
+      where: { id: req.params.userId },
+      data: updates,
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        department: true,
+        company: true,
+        employeeId: true,
+        role: true,
+        hasCredentialAccess: true,
+        hasSubscriptionAccess: true,
+      },
+    })
+
+    res.json({
+      ...updatedUser,
+      role: mapRoleToEnum(updatedUser.role),
+    })
+  } catch (error) {
+    console.error('Error updating team member details:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

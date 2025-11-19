@@ -48,6 +48,8 @@ model User {
   activities    ActivityLog[]
   credentialsCreated Credential[]   @relation("CredentialCreator")
   credentialMembers  CredentialMember[]
+  credentialCollaborationRequestsSent CredentialCollaborationRequest[] @relation("CredentialCollaborationRequester")
+  credentialCollaborationRequestsReceived CredentialCollaborationRequest[] @relation("CredentialCollaborationInvitee")
   subscriptionsCreated Subscription[] @relation("SubscriptionCreator")
   subscriptionMembers SubscriptionMember[]
   projectsCreated Project[] @relation("ProjectCreator")
@@ -61,6 +63,7 @@ model Task {
   description String?
   status      TaskStatus @default(IN_PROGRESS)
   priority    TaskPriority @default(MEDIUM)
+  startDate   DateTime?
   dueDate     DateTime?
   projectId   String?  @db.ObjectId
   brand       String?
@@ -363,6 +366,31 @@ enum NotificationType {
   INVITE       // Team/project invite
   TASK_ASSIGNED // Task assigned to user
   PROJECT_INVITE // Project invitation
+}
+
+model CredentialCollaborationRequest {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  credentialIds String[]
+  requesterId   String   @db.ObjectId
+  inviteeId     String   @db.ObjectId
+  role          String   @default("viewer")
+  status        CredentialCollaborationStatus @default(PENDING)
+  message       String?
+  createdAt     DateTime @default(now())
+  respondedAt   DateTime?
+
+  requester     User     @relation("CredentialCollaborationRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  invitee       User     @relation("CredentialCollaborationInvitee", fields: [inviteeId], references: [id], onDelete: Cascade)
+
+  @@index([inviteeId, status])
+  @@map("credential_collaboration_requests")
+}
+
+enum CredentialCollaborationStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  CANCELLED
 }
 
 enum UserRole {

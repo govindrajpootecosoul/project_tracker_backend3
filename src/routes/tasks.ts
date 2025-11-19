@@ -786,7 +786,7 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const { title, description, status, priority, dueDate, projectId, brand, tags, recurring, assignees } = req.body
+    const { title, description, status, priority, startDate, dueDate, projectId, brand, tags, recurring, assignees } = req.body
 
     if (!title) {
       return res.status(400).json({ error: 'Title is required' })
@@ -811,12 +811,18 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
     const cleanTags = tags && tags.trim() !== '' ? tags.trim() : null
     const cleanRecurring = recurring && recurring.trim() !== '' ? recurring.trim() : null
 
+    const startDateValue =
+      typeof startDate === 'string' && startDate.trim() !== ''
+        ? new Date(startDate)
+        : new Date()
+
     const task = await prisma.task.create({
       data: {
         title,
         description: description && description.trim() !== '' ? description.trim() : null,
         status: status || 'IN_PROGRESS',
         priority: priority || 'MEDIUM',
+        startDate: startDateValue,
         dueDate: dueDate && dueDate.trim() !== '' ? new Date(dueDate) : null,
         projectId: cleanProjectId,
         brand: cleanBrand,
@@ -882,7 +888,7 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
 // Update task
 router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const { title, description, status, priority, dueDate, projectId, brand, tags, recurring, assignees } = req.body
+    const { title, description, status, priority, startDate, dueDate, projectId, brand, tags, recurring, assignees } = req.body
 
     // Get old task data for activity logging
     const oldTask = await prisma.task.findUnique({
@@ -920,6 +926,7 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
         ...(description !== undefined && { description }),
         ...(status && { status }),
         ...(priority && { priority }),
+        ...(startDate !== undefined && { startDate: startDate ? new Date(startDate) : null }),
         ...(dueDate !== undefined && { dueDate: dueDate ? new Date(dueDate) : null }),
         ...(projectId !== undefined && { projectId: cleanProjectId }),
         ...(brand !== undefined && { brand: brand || null }),
