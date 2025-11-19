@@ -199,6 +199,8 @@ router.get('/members', authMiddleware, async (req: AuthRequest, res: Response) =
         email: true,
         department: true,
         role: true,
+        company: true,
+        employeeId: true,
       },
       orderBy: {
         name: 'asc',

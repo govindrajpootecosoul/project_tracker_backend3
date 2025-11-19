@@ -3,8 +3,14 @@ const fs = require('fs');
 const path = require('path');
 
 const prismaCachePath = path.join(__dirname, '..', 'node_modules', '.prisma');
+const shouldKillProcesses = process.env.PREBUILD_KILL_NODE === 'true';
 
 function killLingeringNodeProcesses() {
+  if (!shouldKillProcesses) {
+    console.info('[prebuild] Skipping node process cleanup (set PREBUILD_KILL_NODE=true to enable).');
+    return;
+  }
+
   if (process.platform !== 'win32') {
     return;
   }
