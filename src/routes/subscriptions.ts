@@ -755,7 +755,7 @@ router.post('/collaborations/:requestId/respond', authMiddleware, async (req: Au
           request.requesterId,
           'INVITE',
           'Subscription Collaboration Accepted',
-          `${formatUserName(inviteeUser)} accepted your subscription collaboration request.`,
+          `${formatUserName(inviteeUser ? { name: inviteeUser.name ?? undefined, email: inviteeUser.email } : null)} accepted your subscription collaboration request.`,
           '/subscriptions',
         )
       }
@@ -775,7 +775,7 @@ router.post('/collaborations/:requestId/respond', authMiddleware, async (req: Au
           request.requesterId,
           'INVITE',
           'Subscription Collaboration Declined',
-          `${formatUserName(inviteeUser)} declined your subscription collaboration request.`,
+          `${formatUserName(inviteeUser ? { name: inviteeUser.name ?? undefined, email: inviteeUser.email } : null)} declined your subscription collaboration request.`,
           '/subscriptions',
         )
       }
