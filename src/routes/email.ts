@@ -200,6 +200,13 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
     
     // Group tasks by employee for consistent format
     const tasksByEmployee = new Map<string, { user: any; tasks: any[] }>()
+    const isNewProductDesignDepartment = (value?: string | null) => {
+      return value?.trim().toLowerCase() === 'new product design'
+    }
+
+    const includeMediaColumns =
+      isNewProductDesignDepartment(currentUser?.department) ||
+      tasks.some((task: any) => isNewProductDesignDepartment(task.project?.department))
     
     // First, add all department members (if includeDepartmentTasks is true)
     if (includeDepartmentTasks && allDepartmentMembers.length > 0) {
@@ -295,6 +302,12 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
           const taskTitle = escapeHtml(task.title)
           const priority = escapeHtml(task.priority || 'N/A')
           const dueDate = formatDate(task.dueDate)
+          const showMediaCounts =
+            includeMediaColumns &&
+            (isNewProductDesignDepartment(task.project?.department) || isNewProductDesignDepartment(currentUser?.department))
+          const imageCount = showMediaCounts ? Number(task.imageCount ?? 0) : '-'
+          const videoCount = showMediaCounts ? Number(task.videoCount ?? 0) : '-'
+          const taskLink = task.link ? `<a href="${escapeHtml(task.link)}" target="_blank" style="color: #006ba6; text-decoration: underline;">${escapeHtml(task.link)}</a>` : '-'
           
           return `
             <tr style="background-color: ${rowColor};">
@@ -303,11 +316,14 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
               <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${taskTitle}</td>
               <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${priority}</td>
               <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${dueDate}</td>
+              ${includeMediaColumns ? `<td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${imageCount}</td>` : ''}
+              ${includeMediaColumns ? `<td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${videoCount}</td>` : ''}
+              <td style="padding: 8px; border: 1px solid #ddd; width: 15%; word-wrap: break-word;">${taskLink}</td>
             </tr>
           `
         }).join('') : isOnLeave 
-          ? '<tr><td colspan="5" style="padding: 8px; border: 1px solid #ddd; text-align: center; color: #ff0000; font-weight: bold;">On Leave</td></tr>'
-          : '<tr><td colspan="5" style="padding: 8px; border: 1px solid #ddd; text-align: center; color: #666; font-style: italic;">No tasks assigned</td></tr>'
+          ? `<tr><td colspan="${includeMediaColumns ? 8 : 6}" style="padding: 8px; border: 1px solid #ddd; text-align: center; color: #ff0000; font-weight: bold;">On Leave</td></tr>`
+          : `<tr><td colspan="${includeMediaColumns ? 8 : 6}" style="padding: 8px; border: 1px solid #ddd; text-align: center; color: #666; font-style: italic;">No tasks assigned</td></tr>`
 
         reportContent += `
           <div style="margin-bottom: 30px; border-left: 5px solid #006ba6; padding-left: 15px;">
@@ -327,6 +343,9 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
                   <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Task Title</th>
                   <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Priority</th>
                   <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Due Date</th>
+                  ${includeMediaColumns ? '<th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 10%;">Images</th>' : ''}
+                  ${includeMediaColumns ? '<th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 10%;">Videos</th>' : ''}
+                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 15%;">Link</th>
                 </tr>
               </thead>
               <tbody>

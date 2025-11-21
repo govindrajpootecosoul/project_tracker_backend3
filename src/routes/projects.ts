@@ -2,6 +2,7 @@ import { Router, Response } from 'express'
 import { prisma } from '../lib/prisma'
 import { authMiddleware, AuthRequest } from '../middleware/auth'
 import { microsoftGraphClient } from '../lib/microsoft-graph'
+import { createNotification } from './notifications'
 
 const router = Router()
 
@@ -439,6 +440,10 @@ const sanitizeIdArray = (value: unknown): string[] => {
     .map((item) => item.trim())
 }
 
+const formatUserName = (user?: { name?: string | null; email?: string | null } | null) => {
+  return user?.name || user?.email || 'A teammate'
+}
+
 // Bulk collaboration for multiple projects and members
 router.post('/collaborations/request', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
@@ -519,15 +524,45 @@ router.post('/collaborations/request', authMiddleware, async (req: AuthRequest, 
     }
 
     const results: {
-      memberId: string
+      memberId?: string
       memberName: string
       memberEmail: string
       action: 'created' | 'updated' | 'skipped'
       projectCount: number
       note?: string
+      requestId?: string
+      status?: string
     }[] = []
 
-    for (const memberId of memberIds) {
+    const combinedMemberIds: string[] = [...memberIds]
+
+    for (const email of manualEmails) {
+      const normalizedEmail = email.toLowerCase().trim()
+      const existingUser = await prisma.user.findUnique({
+        where: { email: normalizedEmail },
+        select: { id: true, name: true, email: true },
+      })
+
+      if (!existingUser) {
+        results.push({
+          memberName: '',
+          memberEmail: normalizedEmail,
+          action: 'skipped',
+          projectCount: 0,
+          note: 'User not found. Please ensure the email belongs to an existing team member.',
+        })
+        continue
+      }
+
+      combinedMemberIds.push(existingUser.id)
+      if (!memberLookup.has(existingUser.id)) {
+        memberLookup.set(existingUser.id, existingUser)
+      }
+    }
+
+    const uniqueMemberIds = Array.from(new Set(combinedMemberIds))
+
+    for (const memberId of uniqueMemberIds) {
       const member = memberLookup.get(memberId)
       if (!member) {
         results.push({
@@ -569,173 +604,323 @@ router.post('/collaborations/request', authMiddleware, async (req: AuthRequest, 
         continue
       }
 
-      // Add members to projects
-      let addedCount = 0
-      for (const projectId of shareableProjectIds) {
-        try {
-          await prisma.projectMember.upsert({
-            where: {
-              projectId_userId: {
-                projectId,
-                userId: memberId,
-              },
-            },
-            update: {
-              role: requestedRole,
-            },
-            create: {
-              projectId,
-              userId: memberId,
-              role: requestedRole,
-            },
-          })
-          addedCount++
-        } catch (error: any) {
-          console.error(`Error adding member ${memberId} to project ${projectId}:`, error)
-        }
-      }
-
-      // Create notification
-      await prisma.notification.create({
-        data: {
-          userId: memberId,
-          type: 'PROJECT_INVITE',
-          title: 'Project Collaboration Invitation',
-          message: `${requester?.name || requester?.email || 'A teammate'} invited you to collaborate on ${addedCount} project${addedCount > 1 ? 's' : ''}.`,
-          link: `/projects`,
+      const existingRequest = await prisma.projectCollaborationRequest.findFirst({
+        where: {
+          requesterId: req.userId,
+          inviteeId: memberId,
+          status: 'PENDING',
         },
       })
+
+      if (existingRequest) {
+        const mergedProjectIds = Array.from(new Set([...existingRequest.projectIds, ...shareableProjectIds]))
+        if (mergedProjectIds.length === existingRequest.projectIds.length) {
+          results.push({
+            memberId,
+            memberName: member.name || '',
+            memberEmail: member.email,
+            action: 'skipped',
+            projectCount: shareableProjectIds.length,
+            note: 'There is already a pending collaboration request covering these projects',
+            requestId: existingRequest.id,
+          })
+          continue
+        }
+
+        const updatedRequest = await prisma.projectCollaborationRequest.update({
+          where: { id: existingRequest.id },
+          data: {
+            projectIds: mergedProjectIds,
+            role: requestedRole,
+            message: message ?? existingRequest.message,
+          },
+        })
+
+        // Fetch project details for notification message
+        const newProjectDetails = await prisma.project.findMany({
+          where: { id: { in: shareableProjectIds } },
+          select: { name: true, department: true },
+        })
+
+        const newProjectNames = newProjectDetails.map(p => p.name).join(', ')
+        const newDepartments = Array.from(new Set(newProjectDetails.map(p => p.department).filter(Boolean))).join(', ')
+        const newProjectInfo = newDepartments ? `${newProjectNames} (${newDepartments})` : newProjectNames
+
+        await createNotification(
+          memberId,
+          'PROJECT_INVITE',
+          'Project Collaboration Request Updated',
+          `${requester?.name || requester?.email || 'A teammate'} added more projects (${shareableProjectIds.length}) to your collaboration request: ${newProjectInfo}.`,
+          `/projects?projectCollabRequest=${updatedRequest.id}`,
+        )
+
+        results.push({
+          memberId,
+          memberName: member.name || '',
+          memberEmail: member.email,
+          action: 'updated',
+          projectCount: shareableProjectIds.length,
+          requestId: updatedRequest.id,
+        })
+        continue
+      }
+
+      const createdRequest = await prisma.projectCollaborationRequest.create({
+        data: {
+          requesterId: req.userId,
+          inviteeId: memberId,
+          projectIds: shareableProjectIds,
+          role: requestedRole,
+          message,
+        },
+      })
+
+      // Fetch project details for notification message
+      const projectDetails = await prisma.project.findMany({
+        where: { id: { in: shareableProjectIds } },
+        select: { name: true, department: true },
+      })
+
+      const projectNames = projectDetails.map(p => p.name).join(', ')
+      const departments = Array.from(new Set(projectDetails.map(p => p.department).filter(Boolean))).join(', ')
+      const projectInfo = departments ? `${projectNames} (${departments})` : projectNames
+
+      await createNotification(
+        memberId,
+        'PROJECT_INVITE',
+        'Project Collaboration Request',
+        `${requester?.name || requester?.email || 'A teammate'} invited you to collaborate on ${shareableProjectIds.length} project${shareableProjectIds.length > 1 ? 's' : ''}: ${projectInfo}.`,
+        `/projects?projectCollabRequest=${createdRequest.id}`,
+      )
 
       results.push({
         memberId,
         memberName: member.name || '',
         memberEmail: member.email,
         action: 'created',
-        projectCount: addedCount,
+        projectCount: shareableProjectIds.length,
+        requestId: createdRequest.id,
       })
     }
 
-    // Handle manual emails (for admin to add other department employees)
-    const emailResults: {
-      email: string
-      action: 'sent' | 'skipped'
-      note?: string
-    }[] = []
+    for (const email of manualEmails) {
+      const normalizedEmail = email.toLowerCase().trim()
+      const existingUser = await prisma.user.findUnique({
+        where: { email: normalizedEmail },
+        select: { id: true, name: true, email: true },
+      })
 
-    if (manualEmails.length > 0 && projects.length > 0) {
-      const projectNames = projects.map(p => p.name).join(', ')
-      const emailSubject = `Project Collaboration Invitation - ${projectNames}`
-      const emailBody = `
-        <div style="font-family: Arial, sans-serif; padding: 20px;">
-          <h2 style="color: #006ba6;">Project Collaboration Invitation</h2>
-          <p>Hello,</p>
-          <p>${requester?.name || requester?.email || 'A teammate'} has invited you to collaborate on the following project(s):</p>
-          <ul>
-            ${projects.map(p => `<li><strong>${p.name}</strong>${p.description ? ` - ${p.description}` : ''}</li>`).join('')}
-          </ul>
-          <p>You will have access to view and collaborate on these projects.</p>
-          <p>Please log in to your account to access these projects.</p>
-          <p>Best regards,<br>Project Management Team</p>
-        </div>
-      `
-
-      for (const email of manualEmails) {
-        try {
-          // Check if user exists with this email
-          const existingUser = await prisma.user.findUnique({
-            where: { email: email.toLowerCase().trim() },
-            select: { id: true },
-          })
-
-          if (existingUser) {
-            // User exists - add them to projects
-            let addedCount = 0
-            for (const projectId of projectIds) {
-              try {
-                await prisma.projectMember.upsert({
-                  where: {
-                    projectId_userId: {
-                      projectId,
-                      userId: existingUser.id,
-                    },
-                  },
-                  update: {
-                    role: requestedRole,
-                  },
-                  create: {
-                    projectId,
-                    userId: existingUser.id,
-                    role: requestedRole,
-                  },
-                })
-                addedCount++
-              } catch (error: any) {
-                console.error(`Error adding user ${existingUser.id} to project ${projectId}:`, error)
-              }
-            }
-
-            // Create notification
-            await prisma.notification.create({
-              data: {
-                userId: existingUser.id,
-                type: 'PROJECT_INVITE',
-                title: 'Project Collaboration Invitation',
-                message: `${requester?.name || requester?.email || 'A teammate'} invited you to collaborate on ${addedCount} project${addedCount > 1 ? 's' : ''}.`,
-                link: `/projects`,
-              },
-            })
-
-            emailResults.push({
-              email,
-              action: 'sent',
-            })
-          } else {
-            // User doesn't exist - send invitation email
-            try {
-              await microsoftGraphClient.sendEmail([email], null, emailSubject, emailBody)
-              emailResults.push({
-                email,
-                action: 'sent',
-                note: 'Invitation email sent (user not in system)',
-              })
-            } catch (emailError: any) {
-              console.error(`Error sending email to ${email}:`, emailError)
-              emailResults.push({
-                email,
-                action: 'skipped',
-                note: 'Failed to send invitation email',
-              })
-            }
-          }
-        } catch (error: any) {
-          console.error(`Error processing manual email ${email}:`, error)
-          emailResults.push({
-            email,
-            action: 'skipped',
-            note: 'Error processing email',
-          })
-        }
+      if (!existingUser) {
+        results.push({
+          memberName: '',
+          memberEmail: normalizedEmail,
+          action: 'skipped',
+          projectCount: 0,
+          note: 'User not found. Please ensure the email belongs to an existing team member.',
+        })
+        continue
       }
+
+      if (!memberLookup.has(existingUser.id)) {
+        memberLookup.set(existingUser.id, existingUser)
+      }
+
+      memberIds.push(existingUser.id)
     }
 
     const createdCount = results.filter((entry) => entry.action === 'created').length
+    const updatedCount = results.filter((entry) => entry.action === 'updated').length
     const skippedCount = results.filter((entry) => entry.action === 'skipped').length
-    const emailsSent = emailResults.filter((entry) => entry.action === 'sent').length
 
     res.json({
       message: 'Collaboration requests processed',
       summary: {
         created: createdCount,
-        updated: 0,
+        updated: updatedCount,
         skipped: skippedCount,
         inaccessibleProjectCount,
-        emailsSent,
-        emailResults,
         details: results,
       },
     })
   } catch (error) {
     console.error('Error creating collaboration requests:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get pending collaboration requests for current user
+router.get('/collaborations/requests', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const requests = await prisma.projectCollaborationRequest.findMany({
+      where: {
+        inviteeId: req.userId,
+        status: 'PENDING',
+      },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        requester: {
+          select: { id: true, name: true, email: true },
+        },
+      },
+    })
+
+    const projectIdSet = new Set<string>()
+    requests.forEach((request) => {
+      request.projectIds.forEach((id) => projectIdSet.add(id))
+    })
+
+    const projectList = projectIdSet.size
+      ? await prisma.project.findMany({
+          where: { id: { in: Array.from(projectIdSet) } },
+          select: {
+            id: true,
+            name: true,
+            company: true,
+            department: true,
+          },
+        })
+      : []
+
+    const projectLookup = new Map(projectList.map((project) => [project.id, project]))
+
+    const enrichedRequests = requests.map((request) => ({
+      ...request,
+      projects: request.projectIds.map((id) => projectLookup.get(id)).filter(Boolean),
+    }))
+
+    res.json(enrichedRequests)
+  } catch (error) {
+    console.error('Error fetching project collaboration requests:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get collaboration requests sent by current user
+router.get('/collaborations/requests/sent', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const requests = await prisma.projectCollaborationRequest.findMany({
+      where: {
+        requesterId: req.userId,
+      },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        invitee: {
+          select: { id: true, name: true, email: true },
+        },
+      },
+    })
+
+    res.json(requests)
+  } catch (error) {
+    console.error('Error fetching sent project collaboration requests:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Respond to collaboration request
+router.post('/collaborations/:requestId/respond', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const { accept } = req.body
+    if (typeof accept !== 'boolean') {
+      return res.status(400).json({ error: 'Invalid response payload. Provide accept: true|false.' })
+    }
+
+    const request = await prisma.projectCollaborationRequest.findUnique({
+      where: { id: req.params.requestId },
+      include: {
+        requester: {
+          select: { id: true, name: true, email: true },
+        },
+      },
+    })
+
+    if (!request) {
+      return res.status(404).json({ error: 'Collaboration request not found' })
+    }
+
+    if (request.inviteeId !== req.userId) {
+      return res.status(403).json({ error: 'You do not have access to this collaboration request' })
+    }
+
+    if (request.status !== 'PENDING') {
+      return res.status(400).json({ error: 'This collaboration request has already been processed' })
+    }
+
+    const inviteeUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { name: true, email: true },
+    })
+
+    if (accept) {
+      const projects = await prisma.project.findMany({
+        where: { id: { in: request.projectIds } },
+        include: {
+          members: {
+            select: { userId: true },
+          },
+        },
+      })
+
+      let addedCount = 0
+      for (const project of projects) {
+        const alreadyMember = project.members.some((member) => member.userId === req.userId)
+        if (alreadyMember) continue
+        try {
+          await prisma.projectMember.create({
+            data: {
+              projectId: project.id,
+              userId: req.userId,
+              role: request.role,
+            },
+          })
+          addedCount++
+        } catch (error) {
+          console.error(`Failed adding user ${req.userId} to project ${project.id}:`, error)
+        }
+      }
+
+      await prisma.projectCollaborationRequest.update({
+        where: { id: request.id },
+        data: {
+          status: 'ACCEPTED',
+          respondedAt: new Date(),
+        },
+      })
+
+      if (request.requesterId) {
+        await createNotification(request.requesterId, 'PROJECT_INVITE', 'Project Collaboration Accepted', `${formatUserName(inviteeUser)} accepted your project collaboration request.`, '/projects')
+      }
+
+      res.json({ success: true, addedProjects: addedCount })
+    } else {
+      await prisma.projectCollaborationRequest.update({
+        where: { id: request.id },
+        data: {
+          status: 'CANCELLED',
+          respondedAt: new Date(),
+        },
+      })
+
+      if (request.requesterId) {
+        await createNotification(request.requesterId, 'PROJECT_INVITE', 'Project Collaboration Declined', `${formatUserName(inviteeUser)} declined your project collaboration request.`, '/projects')
+      }
+
+      res.json({ success: true, cancelled: true })
+    }
+  } catch (error) {
+    console.error('Error responding to project collaboration request:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

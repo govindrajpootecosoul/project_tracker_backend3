@@ -786,7 +786,7 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const { title, description, status, priority, startDate, dueDate, projectId, brand, tags, recurring, assignees } = req.body
+    const { title, description, status, priority, startDate, dueDate, projectId, brand, tags, recurring, assignees, imageCount, videoCount, link } = req.body
 
     if (!title) {
       return res.status(400).json({ error: 'Title is required' })
@@ -816,6 +816,14 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
         ? new Date(startDate)
         : new Date()
 
+    const parseCount = (value: unknown): number => {
+      const num = Number(value)
+      if (!Number.isFinite(num) || num < 0) {
+        return 0
+      }
+      return Math.round(num)
+    }
+
     const task = await prisma.task.create({
       data: {
         title,
@@ -828,6 +836,9 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
         brand: cleanBrand,
         tags: cleanTags,
         recurring: cleanRecurring as any,
+        imageCount: parseCount(imageCount),
+        videoCount: parseCount(videoCount),
+        link: link && link.trim() !== '' ? link.trim() : null,
         createdById: req.userId,
         assignees: {
           create: assignees && Array.isArray(assignees) && assignees.length > 0
@@ -888,7 +899,7 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
 // Update task
 router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const { title, description, status, priority, startDate, dueDate, projectId, brand, tags, recurring, assignees } = req.body
+    const { title, description, status, priority, startDate, dueDate, projectId, brand, tags, recurring, assignees, imageCount, videoCount, link } = req.body
 
     // Get old task data for activity logging
     const oldTask = await prisma.task.findUnique({
@@ -919,6 +930,15 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
       ? projectId.trim()
       : null
 
+    const parseCount = (value: unknown): number | undefined => {
+      if (value === undefined || value === null || value === '') return undefined
+      const num = Number(value)
+      if (!Number.isFinite(num) || num < 0) return 0
+      return Math.round(num)
+    }
+    const parsedImageCount = parseCount(imageCount)
+    const parsedVideoCount = parseCount(videoCount)
+
     const task = await prisma.task.update({
       where: { id: req.params.id },
       data: {
@@ -932,6 +952,9 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
         ...(brand !== undefined && { brand: brand || null }),
         ...(tags !== undefined && { tags: tags || null }),
         ...(recurring !== undefined && { recurring: recurring || null }),
+        ...(parsedImageCount !== undefined && { imageCount: parsedImageCount }),
+        ...(parsedVideoCount !== undefined && { videoCount: parsedVideoCount }),
+        ...(link !== undefined && { link: link && link.trim() !== '' ? link.trim() : null }),
         // Clear review status when status is manually changed (unless it's ON_HOLD due to review)
         ...(status && status !== 'ON_HOLD' && { 
           reviewStatus: null,

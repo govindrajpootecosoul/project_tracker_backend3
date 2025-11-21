@@ -52,7 +52,11 @@ model User {
   credentialCollaborationRequestsReceived CredentialCollaborationRequest[] @relation("CredentialCollaborationInvitee")
   subscriptionsCreated Subscription[] @relation("SubscriptionCreator")
   subscriptionMembers SubscriptionMember[]
+  subscriptionCollaborationRequestsSent SubscriptionCollaborationRequest[] @relation("SubscriptionCollabRequester")
+  subscriptionCollaborationRequestsReceived SubscriptionCollaborationRequest[] @relation("SubscriptionCollabInvitee")
   projectsCreated Project[] @relation("ProjectCreator")
+  projectCollaborationRequestsSent ProjectCollaborationRequest[] @relation("ProjectCollabRequester")
+  projectCollaborationRequestsReceived ProjectCollaborationRequest[] @relation("ProjectCollabInvitee")
   
   @@map("users")
 }
@@ -69,6 +73,9 @@ model Task {
   brand       String?
   tags        String?  // JSON array of tags
   recurring   RecurringType?
+  imageCount  Int      @default(0)
+  videoCount  Int      @default(0)
+  link        String?
   reviewStatus TaskReviewStatus? // REVIEW_REQUESTED, UNDER_REVIEW, APPROVED, REJECTED, null
   reviewRequestedById String? @db.ObjectId // User who requested review
   reviewRequestedAt DateTime? // When review was requested
@@ -131,13 +138,39 @@ model ProjectMember {
   userId    String   @db.ObjectId
   role      String   @default("member")
   joinedAt  DateTime @default(now())
-  
+
   // Relations
   project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
+
   @@unique([projectId, userId])
   @@map("project_members")
+}
+
+model ProjectCollaborationRequest {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  projectIds    String[]
+  requesterId   String   @db.ObjectId
+  inviteeId     String?  @db.ObjectId
+  inviteeEmail  String?
+  role          String   @default("member")
+  status        ProjectCollaborationStatus @default(PENDING)
+  message       String?
+  createdAt     DateTime @default(now())
+  respondedAt   DateTime?
+
+  requester User @relation("ProjectCollabRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  invitee   User? @relation("ProjectCollabInvitee", fields: [inviteeId], references: [id], onDelete: Cascade)
+
+  @@index([inviteeId, status])
+  @@index([requesterId, status])
+  @@map("project_collaboration_requests")
+}
+
+enum ProjectCollaborationStatus {
+  PENDING
+  ACCEPTED
+  CANCELLED
 }
 
 model Team {
@@ -390,6 +423,30 @@ enum CredentialCollaborationStatus {
   PENDING
   ACCEPTED
   DECLINED
+  CANCELLED
+}
+
+model SubscriptionCollaborationRequest {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  subscriptionIds String[]
+  requesterId   String   @db.ObjectId
+  inviteeId     String   @db.ObjectId
+  role          String   @default("viewer")
+  status        SubscriptionCollaborationStatus @default(PENDING)
+  message       String?
+  createdAt     DateTime @default(now())
+  respondedAt   DateTime?
+
+  requester     User     @relation("SubscriptionCollabRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  invitee       User     @relation("SubscriptionCollabInvitee", fields: [inviteeId], references: [id], onDelete: Cascade)
+
+  @@index([inviteeId, status])
+  @@map("subscription_collaboration_requests")
+}
+
+enum SubscriptionCollaborationStatus {
+  PENDING
+  ACCEPTED
   CANCELLED
 }
 
