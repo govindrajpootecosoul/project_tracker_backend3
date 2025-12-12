@@ -61,6 +61,16 @@ model User {
   @@map("users")
 }
 
+model Department {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  name        String   @unique
+  createdById String?  @db.ObjectId
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("departments")
+}
+
 model Task {
   id          String   @id @default(auto()) @map("_id") @db.ObjectId
   title       String

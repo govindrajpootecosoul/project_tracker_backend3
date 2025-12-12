@@ -24,12 +24,22 @@ const normalizeRoleInput = (role?: string | null) => {
   return trimmed
 }
 
+const normalizeDepartmentName = (name?: string | null) => {
+  if (!name) return null
+  const trimmed = name.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
 const normalizeEmailInput = (email?: string | null) => {
   if (!email) return ''
   return email.trim().toLowerCase()
 }
 
 const isSuperAdmin = (role?: string | null) => role?.toLowerCase() === 'superadmin'
+const isAdminOrSuperAdmin = (role?: string | null) => {
+  const normalized = role?.toLowerCase()
+  return normalized === 'admin' || normalized === 'superadmin'
+}
 
 // Get all users (for search and filtering)
 router.get('/users', authMiddleware, async (req: AuthRequest, res: Response) => {
@@ -116,25 +126,309 @@ router.get('/departments', authMiddleware, async (req: AuthRequest, res: Respons
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const users = await prisma.user.findMany({
-      where: {
-        department: { not: null },
-      },
-      select: {
-        department: true,
-      },
-      distinct: ['department'],
+    let departmentRecords: { id: string; name: string }[] = []
+    
+    // Try to fetch managed departments, but fall back to legacy if model doesn't exist
+    try {
+      departmentRecords = await prisma.department.findMany({
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      })
+    } catch (deptError: any) {
+      // If Department model doesn't exist, just use empty array (will fall back to legacy)
+      console.warn('Department model not available, using legacy mode:', deptError?.message || 'Unknown error')
+    }
+
+    const [userDepartments, projectDepartments] = await Promise.all([
+      prisma.user.findMany({
+        where: { department: { not: null } },
+        select: { department: true },
+        distinct: ['department'],
+      }),
+      prisma.project.findMany({
+        where: { department: { not: null } },
+        select: { department: true },
+        distinct: ['department'],
+      }),
+    ])
+
+    const departmentMap = new Map<string, { id?: string; name: string }>()
+
+    // Add managed departments
+    departmentRecords.forEach((dept) => {
+      const normalized = dept.name.toLowerCase()
+      departmentMap.set(normalized, { id: dept.id, name: dept.name })
     })
 
-    const departments = users
-      .map(u => u.department)
-      .filter((d): d is string => d !== null)
-      .sort()
+    // Add any departments that exist only via legacy user/project data
+    const legacyDepartments = [...userDepartments, ...projectDepartments]
+      .map((entry) => entry.department)
+      .filter((dept): dept is string => Boolean(dept))
+
+    legacyDepartments.forEach((deptName) => {
+      const normalized = deptName.toLowerCase()
+      if (!departmentMap.has(normalized)) {
+        departmentMap.set(normalized, { name: deptName })
+      }
+    })
+
+    const departments = await Promise.all(
+      Array.from(departmentMap.values()).map(async (dept) => {
+        const [userCount, projectCount] = await Promise.all([
+          prisma.user.count({ where: { department: dept.name } }),
+          prisma.project.count({ where: { department: dept.name } }),
+        ])
+        return { ...dept, userCount, projectCount }
+      })
+    )
 
     res.json(departments)
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error fetching departments:', error)
-    res.status(500).json({ error: 'Internal server error' })
+    const errorMessage = error?.message || 'Internal server error'
+    res.status(500).json({ error: errorMessage })
+  }
+})
+
+// Create a new department (super admin only)
+router.post('/departments', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { role: true },
+    })
+
+    if (!currentUser || !isSuperAdmin(currentUser.role)) {
+      return res.status(403).json({ error: 'Only super admins can manage departments' })
+    }
+
+    const normalizedName = normalizeDepartmentName(req.body?.name)
+    if (!normalizedName) {
+      return res.status(400).json({ error: 'Department name is required' })
+    }
+
+    // Check if department model is available
+    if (!prisma.department) {
+      return res.status(500).json({ 
+        error: 'Department model not available. Please run: npx prisma generate in the backend directory' 
+      })
+    }
+
+    try {
+      const existingDepartment = await prisma.department.findFirst({
+        where: { name: { equals: normalizedName, mode: 'insensitive' } },
+      })
+
+      if (existingDepartment) {
+        return res.status(409).json({ error: 'A department with this name already exists' })
+      }
+
+      // Check if any users/projects already have this department name (legacy)
+      const existingUsers = await prisma.user.findFirst({
+        where: { department: { equals: normalizedName, mode: 'insensitive' } },
+      })
+
+      if (existingUsers) {
+        return res.status(409).json({ error: 'A department with this name already exists (in use by users/projects)' })
+      }
+
+      const department = await prisma.department.create({
+        data: {
+          name: normalizedName,
+          createdById: req.userId,
+        },
+      })
+
+      const [userCount, projectCount] = await Promise.all([
+        prisma.user.count({ where: { department: department.name } }),
+        prisma.project.count({ where: { department: department.name } }),
+      ])
+
+      res.status(201).json({ ...department, userCount, projectCount })
+    } catch (deptError: any) {
+      // If Department model doesn't exist, provide helpful error
+      if (deptError?.code === 'P2001' || deptError?.code === 'P2002' || deptError?.message?.includes('model') || deptError?.message?.includes('Department')) {
+        console.error('Department model error:', deptError)
+        return res.status(500).json({ 
+          error: 'Department model not available. Please run: npx prisma generate in the backend directory' 
+        })
+      }
+      throw deptError
+    }
+  } catch (error: any) {
+    console.error('Error creating department:', error)
+    const errorMessage = error?.message || 'Internal server error'
+    res.status(500).json({ error: errorMessage })
+  }
+})
+
+// Delete a department (super admin only)
+router.delete('/departments/:departmentId', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { role: true },
+    })
+
+    if (!currentUser || !isSuperAdmin(currentUser.role)) {
+      return res.status(403).json({ error: 'Only super admins can delete departments' })
+    }
+
+    // Check if department model is available
+    if (!prisma.department) {
+      return res.status(500).json({ 
+        error: 'Department model not available. Please run: npx prisma generate in the backend directory' 
+      })
+    }
+
+    try {
+      const department = await prisma.department.findUnique({
+        where: { id: req.params.departmentId },
+      })
+
+      if (!department) {
+        return res.status(404).json({ error: 'Department not found' })
+      }
+
+      const [userCount, projectCount] = await Promise.all([
+        prisma.user.count({ where: { department: department.name } }),
+        prisma.project.count({ where: { department: department.name } }),
+      ])
+
+      if (userCount > 0 || projectCount > 0) {
+        return res.status(400).json({
+          error: 'Cannot delete department while it is assigned to users or projects',
+          userCount,
+          projectCount,
+        })
+      }
+
+      await prisma.department.delete({
+        where: { id: req.params.departmentId },
+      })
+
+      res.json({ success: true })
+    } catch (deptError: any) {
+      // If Department model doesn't exist, provide helpful error
+      if (deptError?.code === 'P2001' || deptError?.code === 'P2002' || deptError?.message?.includes('model') || deptError?.message?.includes('Department')) {
+        console.error('Department model error:', deptError)
+        return res.status(500).json({ 
+          error: 'Department model not available. Please run: npx prisma generate in the backend directory' 
+        })
+      }
+      throw deptError
+    }
+  } catch (error: any) {
+    console.error('Error deleting department:', error)
+    const errorMessage = error?.message || 'Internal server error'
+    res.status(500).json({ error: errorMessage })
+  }
+})
+
+// Update a department name (super admin only)
+router.put('/departments/:departmentId', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { role: true },
+    })
+
+    if (!currentUser || !isSuperAdmin(currentUser.role)) {
+      return res.status(403).json({ error: 'Only super admins can update departments' })
+    }
+
+    const normalizedName = normalizeDepartmentName(req.body?.name)
+    if (!normalizedName) {
+      return res.status(400).json({ error: 'Department name is required' })
+    }
+
+    // Check if department model is available
+    if (!prisma.department) {
+      return res.status(500).json({ 
+        error: 'Department model not available. Please run: npx prisma generate in the backend directory' 
+      })
+    }
+
+    try {
+      const existing = await prisma.department.findUnique({
+        where: { id: req.params.departmentId },
+      })
+
+      if (!existing) {
+        return res.status(404).json({ error: 'Department not found' })
+      }
+
+      const oldDepartmentName = existing.name
+
+      // Check for name conflicts
+      const conflict = await prisma.department.findFirst({
+        where: {
+          id: { not: req.params.departmentId },
+          name: { equals: normalizedName, mode: 'insensitive' },
+        },
+        select: { id: true },
+      })
+
+      if (conflict) {
+        return res.status(409).json({ error: 'Another department with this name already exists' })
+      }
+
+      // Update the department record
+      const updated = await prisma.department.update({
+        where: { id: req.params.departmentId },
+        data: { name: normalizedName },
+      })
+
+      // Update all users with the old department name to the new name
+      const updateUsersResult = await prisma.user.updateMany({
+        where: { department: oldDepartmentName },
+        data: { department: normalizedName },
+      })
+
+      // Update all projects with the old department name to the new name
+      const updateProjectsResult = await prisma.project.updateMany({
+        where: { department: oldDepartmentName },
+        data: { department: normalizedName },
+      })
+
+      const [userCount, projectCount] = await Promise.all([
+        prisma.user.count({ where: { department: normalizedName } }),
+        prisma.project.count({ where: { department: normalizedName } }),
+      ])
+
+      res.json({ 
+        ...updated, 
+        userCount, 
+        projectCount,
+        usersUpdated: updateUsersResult.count,
+        projectsUpdated: updateProjectsResult.count,
+      })
+    } catch (deptError: any) {
+      // If Department model doesn't exist, provide helpful error
+      if (deptError?.code === 'P2001' || deptError?.code === 'P2002' || deptError?.message?.includes('model') || deptError?.message?.includes('Department')) {
+        console.error('Department model error:', deptError)
+        return res.status(500).json({ 
+          error: 'Department model not available. Please run: npx prisma generate in the backend directory' 
+        })
+      }
+      throw deptError
+    }
+  } catch (error: any) {
+    console.error('Error updating department:', error)
+    const errorMessage = error?.message || 'Internal server error'
+    res.status(500).json({ error: errorMessage })
   }
 })
 
@@ -165,29 +459,24 @@ router.get('/members', authMiddleware, async (req: AuthRequest, res: Response) =
     // Build where condition for users
     const where: any = {}
     
-    // If searching, search across ALL users (don't filter by department)
-    // If not searching, apply department filter
-    if (!search || typeof search !== 'string') {
-      // If not super admin, filter by user's department by default
-      if (!isSuperAdmin && currentUser.department) {
-        // Default to user's department if no department filter is selected
-        if (!department || department === 'all') {
-          where.department = currentUser.department
-        } else if (department && typeof department === 'string' && department !== 'all') {
-          // If department filter is selected, use that (but only if it matches user's department)
-          where.department = department === currentUser.department ? department : currentUser.department
-        }
-      } else if (isSuperAdmin) {
-        // Super admin can see all departments
-        if (department && typeof department === 'string' && department !== 'all') {
-          where.department = department
-        }
-        // If no department filter, show all (no where condition)
+    // Apply department filter first (before search)
+    if (!isSuperAdmin && currentUser.department) {
+      // Regular users: only show their department
+      if (!department || department === 'all') {
+        where.department = currentUser.department
+      } else if (department && typeof department === 'string' && department !== 'all') {
+        // If department filter is selected, use that (but only if it matches user's department)
+        where.department = department === currentUser.department ? department : currentUser.department
       }
+    } else if (isSuperAdmin) {
+      // Super admin can see all departments or filter by selected department
+      if (department && typeof department === 'string' && department !== 'all') {
+        where.department = department
+      }
+      // If no department filter, show all (no where condition)
     }
-    // If searching, don't add department filter - we want to search all users
 
-    // Get all users matching the criteria
+    // Get all users matching the department criteria
     let users = await prisma.user.findMany({
       where: {
         ...where,
@@ -207,23 +496,13 @@ router.get('/members', authMiddleware, async (req: AuthRequest, res: Response) =
       },
     })
 
-    // Apply search filter (case-insensitive) - search across ALL users
+    // Apply search filter (case-insensitive) - search within the already filtered users
     if (search && typeof search === 'string') {
       const searchLower = search.toLowerCase()
       users = users.filter(user => 
         user.name?.toLowerCase().includes(searchLower) ||
         user.email.toLowerCase().includes(searchLower)
       )
-      
-      // After search, apply department filter if selected
-      if (!isSuperAdmin && currentUser.department) {
-        // Regular users: only show their department even after search
-        users = users.filter(user => user.department === currentUser.department)
-      } else if (isSuperAdmin && department && typeof department === 'string' && department !== 'all') {
-        // If super admin selected a department, filter by that
-        users = users.filter(user => user.department === department)
-      }
-      // If super admin and no department filter, show all search results
     }
     
     const userIds = users.map(u => u.id)
@@ -539,6 +818,91 @@ router.put('/members/:userId/details', authMiddleware, async (req: AuthRequest, 
   } catch (error) {
     console.error('Error updating team member details:', error)
     res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Update member department (admin or super admin)
+router.put('/members/:userId/department', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { role: true },
+    })
+
+    if (!currentUser || !isAdminOrSuperAdmin(currentUser.role)) {
+      return res.status(403).json({ error: 'Only admins can update departments' })
+    }
+
+    const normalizedDepartment = normalizeDepartmentName(req.body?.department)
+
+    const targetUser = await prisma.user.findUnique({
+      where: { id: req.params.userId },
+      select: {
+        id: true,
+        role: true,
+        email: true,
+      },
+    })
+
+    if (!targetUser) {
+      return res.status(404).json({ error: 'Team member not found' })
+    }
+
+    let resolvedDepartment = normalizedDepartment
+
+    // Try to find or create department record if department name is provided
+    if (normalizedDepartment) {
+      try {
+        let departmentRecord = await prisma.department.findFirst({
+          where: { name: { equals: normalizedDepartment, mode: 'insensitive' } },
+        })
+
+        if (!departmentRecord) {
+          departmentRecord = await prisma.department.create({
+            data: {
+              name: normalizedDepartment,
+              createdById: req.userId,
+            },
+          })
+        }
+
+        resolvedDepartment = departmentRecord.name
+      } catch (deptError: any) {
+        // If Department model doesn't exist or Prisma client not regenerated, 
+        // fall back to using the department name directly (legacy mode)
+        console.warn('Department model not available, using legacy mode:', deptError.message)
+        resolvedDepartment = normalizedDepartment
+      }
+    }
+
+    const updatedUser = await prisma.user.update({
+      where: { id: req.params.userId },
+      data: { department: resolvedDepartment || null },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        department: true,
+        company: true,
+        employeeId: true,
+        role: true,
+        hasCredentialAccess: true,
+        hasSubscriptionAccess: true,
+      },
+    })
+
+    res.json({
+      ...updatedUser,
+      role: mapRoleToEnum(updatedUser.role),
+    })
+  } catch (error: any) {
+    console.error('Error updating member department:', error)
+    const errorMessage = error?.message || 'Internal server error'
+    res.status(500).json({ error: errorMessage })
   }
 })
 
