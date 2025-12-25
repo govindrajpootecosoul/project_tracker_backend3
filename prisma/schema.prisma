@@ -470,6 +470,22 @@ model Thought {
   @@map("thoughts")
 }
 
+model AutoEmailConfig {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  enabled       Boolean  @default(false)
+  toEmails      String[] @default(["priyanka.aeron@ecosoulhome.com", "charu.anand@ecosoulhome.com"]) // Array of recipient emails
+  departments   String[] // Array of department names
+  daysOfWeek    Int[]    // Array of day numbers (0=Sunday, 1=Monday, ..., 6=Saturday)
+  timeOfDay     String   // Time in HH:MM format (e.g., "18:00")
+  timezone      String   @default("Asia/Kolkata")
+  sendWhenEmpty Boolean  @default(false)
+  lastRunAt     DateTime? // Track last automatic send time
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("auto_email_configs")
+}
+
 enum SubscriptionCollaborationStatus {
   PENDING
   ACCEPTED

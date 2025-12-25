@@ -14,6 +14,7 @@ import aiRoutes from './routes/ai';
 import activityRoutes from './routes/activities';
 import thoughtRoutes, { ensureThoughtsSeed } from './routes/thoughts';
 import { backfillTaskAssignees } from './scripts/backfill-task-assignees';
+import { startEmailScheduler } from './utils/emailScheduler';
 
 dotenv.config();              
 
@@ -93,6 +94,13 @@ app.listen(PORT, async () => {
     await ensureThoughtsSeed();
   } catch (error) {
     console.error('Error seeding default thoughts:', error);
+  }
+
+  // Start email scheduler
+  try {
+    startEmailScheduler();
+  } catch (error) {
+    console.error('Error starting email scheduler:', error);
   }
 });
 
