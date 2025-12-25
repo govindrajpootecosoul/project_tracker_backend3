@@ -12,6 +12,7 @@ import subscriptionRoutes from './routes/subscriptions';
 import commentRoutes from './routes/comments';
 import aiRoutes from './routes/ai';
 import activityRoutes from './routes/activities';
+import thoughtRoutes, { ensureThoughtsSeed } from './routes/thoughts';
 import { backfillTaskAssignees } from './scripts/backfill-task-assignees';
 
 dotenv.config();              
@@ -72,6 +73,7 @@ app.use('/api/subscriptions', subscriptionRoutes);
 app.use('/api', commentRoutes);
 app.use('/api', aiRoutes);
 app.use('/api/activities', activityRoutes);
+app.use('/api/thoughts', thoughtRoutes);
 
 // Start server
 app.listen(PORT, async () => {
@@ -85,6 +87,12 @@ app.listen(PORT, async () => {
   } catch (error) {
     console.error('Error during task assignee backfill on startup:', error);
     // Don't crash the server if backfill fails
+  }
+
+  try {
+    await ensureThoughtsSeed();
+  } catch (error) {
+    console.error('Error seeding default thoughts:', error);
   }
 });
 

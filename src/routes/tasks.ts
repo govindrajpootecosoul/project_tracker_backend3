@@ -788,9 +788,27 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     const { title, description, status, priority, startDate, dueDate, projectId, brand, tags, recurring, assignees, imageCount, videoCount, link } = req.body
 
-    if (!title) {
+    if (!title || typeof title !== 'string' || !title.trim()) {
       return res.status(400).json({ error: 'Title is required' })
     }
+
+    // Split titles by comma and trim
+    const titles = title
+      .split(',')
+      .map(t => t.trim())
+      .filter(t => t.length > 0)
+
+    if (titles.length === 0) {
+      return res.status(400).json({ error: 'At least one valid title is required' })
+    }
+
+    // Split descriptions by comma and trim (optional)
+    const descriptions = description && typeof description === 'string' && description.trim()
+      ? description
+          .split(',')
+          .map(d => d.trim())
+          .filter(d => d.length > 0)
+      : []
 
     // Clean up empty strings to null and validate ObjectIDs
     // MongoDB ObjectID must be 24 hex characters (12 bytes)
@@ -824,10 +842,22 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       return Math.round(num)
     }
 
-    const task = await prisma.task.create({
-      data: {
-        title,
-        description: description && description.trim() !== '' ? description.trim() : null,
+    // Prepare assignees list
+    const assigneeList = assignees && Array.isArray(assignees) && assignees.length > 0
+      ? assignees.map((userId: string) => ({ userId }))
+      : [{ userId: req.userId }]
+
+    // Create multiple tasks
+    const tasksToCreate = titles.map((taskTitle, index) => {
+      // Map description: first description to first task, second to second, etc.
+      // If no description for this task, use empty string
+      const taskDescription = index < descriptions.length 
+        ? descriptions[index] 
+        : null
+
+      return {
+        title: taskTitle,
+        description: taskDescription && taskDescription.trim() !== '' ? taskDescription.trim() : null,
         status: status || 'IN_PROGRESS',
         priority: priority || 'MEDIUM',
         startDate: startDateValue,
@@ -841,50 +871,75 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
         link: link && link.trim() !== '' ? link.trim() : null,
         createdById: req.userId,
         assignees: {
-          create: assignees && Array.isArray(assignees) && assignees.length > 0
-            ? assignees.map((userId: string) => ({ userId }))
-            : [{ userId: req.userId }],
+          create: assigneeList,
         },
-      },
-      include: {
-        assignees: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-        },
-      },
+      }
     })
 
-    // Log activity
-    const project = task.projectId ? await prisma.project.findUnique({
-      where: { id: task.projectId },
+    // Create all tasks in a transaction
+    const createdTasks = await prisma.$transaction(
+      tasksToCreate.map(taskData =>
+        prisma.task.create({
+          data: taskData,
+          include: {
+            assignees: {
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    name: true,
+                    email: true,
+                  },
+                },
+              },
+            },
+            project: {
+              select: { name: true },
+            },
+          },
+        })
+      )
+    )
+
+    // Log activity for each task
+    const project = cleanProjectId ? await prisma.project.findUnique({
+      where: { id: cleanProjectId },
       select: { name: true },
     }) : null
 
-    await logActivity({
-      type: 'TASK_CREATED',
-      action: 'Task Created',
-      description: `Created task "${task.title}"${project ? ` in project "${project.name}"` : ''}`,
-      entityType: 'task',
-      entityId: task.id,
-      metadata: {
-        taskTitle: task.title,
-        projectName: project?.name,
-        status: task.status,
-        priority: task.priority,
-      },
-      userId: req.userId,
-    })
+    await Promise.all(
+      createdTasks.map(task =>
+        logActivity({
+          type: 'TASK_CREATED',
+          action: 'Task Created',
+          description: `Created task "${task.title}"${project ? ` in project "${project.name}"` : ''}`,
+          entityType: 'task',
+          entityId: task.id,
+          metadata: {
+            taskTitle: task.title,
+            projectName: project?.name,
+            status: task.status,
+            priority: task.priority,
+          },
+          userId: req.userId,
+        })
+      )
+    )
 
-    res.status(201).json(task)
+    // Return all created tasks
+    // If only one task was created, return it directly for backward compatibility
+    // Otherwise return an array
+    if (createdTasks.length === 1) {
+      res.status(201).json(createdTasks[0])
+    } else {
+      res.status(201).json({
+        success: true,
+        count: createdTasks.length,
+        tasks: createdTasks,
+      })
+    }
   } catch (error: any) {
-    console.error('Error creating task:', error)
+    console.error('Error creating task(s):', error)
     // Return more detailed error message
     if (error.code === 'P2002') {
       return res.status(400).json({ error: 'Task with this identifier already exists' })

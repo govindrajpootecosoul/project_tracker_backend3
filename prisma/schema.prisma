@@ -57,6 +57,7 @@ model User {
   projectsCreated Project[] @relation("ProjectCreator")
   projectCollaborationRequestsSent ProjectCollaborationRequest[] @relation("ProjectCollabRequester")
   projectCollaborationRequestsReceived ProjectCollaborationRequest[] @relation("ProjectCollabInvitee")
+  thoughtsUpdated Thought[]
   
   @@map("users")
 }
@@ -452,6 +453,21 @@ model SubscriptionCollaborationRequest {
 
   @@index([inviteeId, status])
   @@map("subscription_collaboration_requests")
+}
+
+model Thought {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  content     String
+  order       Int
+  isActive    Boolean  @default(false) @map("isActive")
+  selectedForDate DateTime? @map("selectedForDate") // Date when this thought was manually selected
+  updatedById String?  @db.ObjectId
+  updatedBy   User?    @relation(fields: [updatedById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([order])
+  @@map("thoughts")
 }
 
 enum SubscriptionCollaborationStatus {
