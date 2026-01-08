@@ -915,11 +915,24 @@ router.post('/admin/auto-email-config', authMiddleware, async (req: AuthRequest,
     let config = await prisma.autoEmailConfig.findFirst()
     if (config) {
       // Update existing config
+      // Process toEmails: if provided, use it; otherwise keep existing
+      let processedToEmails = config.toEmails
+      if (toEmails !== undefined) {
+        if (Array.isArray(toEmails)) {
+          // Filter out empty strings and normalize emails
+          processedToEmails = toEmails
+            .filter((email: string) => email && typeof email === 'string' && email.trim())
+            .map((email: string) => email.trim().toLowerCase())
+          // Remove duplicates
+          processedToEmails = [...new Set(processedToEmails)]
+        }
+      }
+      
       config = await prisma.autoEmailConfig.update({
         where: { id: config.id },
         data: {
           enabled: enabled ?? config.enabled,
-          toEmails: toEmails !== undefined ? toEmails.map((email: string) => email.trim().toLowerCase()) : config.toEmails,
+          toEmails: processedToEmails,
           timezone: timezone ?? config.timezone,
           sendWhenEmpty: sendWhenEmpty ?? config.sendWhenEmpty,
         },
@@ -927,10 +940,24 @@ router.post('/admin/auto-email-config', authMiddleware, async (req: AuthRequest,
     } else {
       // Create new config
       const defaultToEmails = ['priyanka.aeron@ecosoulhome.com', 'charu.anand@ecosoulhome.com']
+      let processedToEmails = defaultToEmails
+      if (toEmails && Array.isArray(toEmails) && toEmails.length > 0) {
+        // Filter out empty strings and normalize emails
+        processedToEmails = toEmails
+          .filter((email: string) => email && typeof email === 'string' && email.trim())
+          .map((email: string) => email.trim().toLowerCase())
+        // Remove duplicates
+        processedToEmails = [...new Set(processedToEmails)]
+        // If no valid emails after processing, use defaults
+        if (processedToEmails.length === 0) {
+          processedToEmails = defaultToEmails
+        }
+      }
+      
       config = await prisma.autoEmailConfig.create({
         data: {
           enabled: enabled ?? false,
-          toEmails: toEmails ? toEmails.map((email: string) => email.trim().toLowerCase()) : defaultToEmails,
+          toEmails: processedToEmails,
           timezone: timezone ?? 'Asia/Kolkata',
           sendWhenEmpty: sendWhenEmpty ?? false,
         },

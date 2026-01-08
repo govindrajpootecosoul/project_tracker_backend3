@@ -152,8 +152,8 @@ router.get('/my', authMiddleware, async (req: AuthRequest, res: Response) => {
           },
         },
         orderBy: [
-          { statusUpdatedAt: 'desc' },
           { createdAt: 'desc' },
+          { statusUpdatedAt: 'desc' },
         ],
         take: limit,
         skip: skip,
@@ -300,8 +300,8 @@ router.get('/department', authMiddleware, async (req: AuthRequest, res: Response
           },
         },
         orderBy: [
-          { statusUpdatedAt: 'desc' },
           { createdAt: 'desc' },
+          { statusUpdatedAt: 'desc' },
         ],
         take: limit,
         skip: skip,
@@ -399,8 +399,8 @@ router.get('/all-departments', authMiddleware, async (req: AuthRequest, res: Res
           },
         },
         orderBy: [
-          { statusUpdatedAt: 'desc' },
           { createdAt: 'desc' },
+          { statusUpdatedAt: 'desc' },
         ],
         take: limit,
         skip: skip,
@@ -533,8 +533,8 @@ router.get('/team', authMiddleware, async (req: AuthRequest, res: Response) => {
           },
         },
         orderBy: [
-          { statusUpdatedAt: 'desc' },
           { createdAt: 'desc' },
+          { statusUpdatedAt: 'desc' },
         ],
         take: limit,
         skip: skip,
@@ -640,8 +640,8 @@ router.get('/review', authMiddleware, async (req: AuthRequest, res: Response) =>
           },
         },
         orderBy: [
-          { statusUpdatedAt: 'desc' },
           { createdAt: 'desc' },
+          { statusUpdatedAt: 'desc' },
         ],
         take: limit,
         skip: skip,
@@ -956,11 +956,11 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
     }
 
     // Split descriptions by comma and trim (optional)
+    // Don't filter out empty strings to maintain index mapping with titles
     const descriptions = description && typeof description === 'string' && description.trim()
       ? description
           .split(',')
           .map(d => d.trim())
-          .filter(d => d.length > 0)
       : []
 
     // Clean up empty strings to null and validate ObjectIDs
@@ -1060,9 +1060,16 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       select: { name: true },
     }) : null
 
+    // Get creator info for notifications
+    const creator = await prisma.user.findUnique({
+      where: { id: req.userId! },
+      select: { name: true, email: true },
+    })
+
     await Promise.all(
-      createdTasks.map(task =>
-        logActivity({
+      createdTasks.map(async (task) => {
+        // Log activity
+        await logActivity({
           type: 'TASK_CREATED',
           action: 'Task Created',
           description: `Created task "${task.title}"${project ? ` in project "${project.name}"` : ''}`,
@@ -1076,7 +1083,59 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
           },
           userId: req.userId!,
         })
-      )
+
+        // Create notifications and send emails to assignees (excluding creator if they're assigned)
+        if (task.assignees && task.assignees.length > 0) {
+          const assigneeNotifications = task.assignees
+            .filter((assignee) => assignee.userId !== req.userId) // Don't notify creator if they're assigned
+            .map(async (assignee) => {
+              const assigneeUser = assignee.user
+              if (!assigneeUser || !assigneeUser.email) return
+
+              // Create notification
+              await prisma.notification.create({
+                data: {
+                  userId: assignee.userId,
+                  type: 'TASK_ASSIGNED',
+                  title: 'New Task Assigned',
+                  message: `You have been assigned to task "${task.title}"${project ? ` in project "${project.name}"` : ''}`,
+                  link: `/tasks/${task.id}`,
+                },
+              })
+
+              // Send email notification
+              try {
+                const { microsoftGraphClient } = await import('../lib/microsoft-graph')
+                const emailSubject = `New Task Assigned: ${task.title}`
+                const emailBody = `
+                  <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                    <h2 style="color: #333;">New Task Assigned</h2>
+                    <p>Hello ${assigneeUser.name || assigneeUser.email},</p>
+                    <p>You have been assigned to a new task:</p>
+                    <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                      <p style="margin: 5px 0;"><strong>Task:</strong> ${task.title}</p>
+                      ${task.description ? `<p style="margin: 5px 0;"><strong>Description:</strong> ${task.description}</p>` : ''}
+                      ${project ? `<p style="margin: 5px 0;"><strong>Project:</strong> ${project.name}</p>` : ''}
+                      <p style="margin: 5px 0;"><strong>Status:</strong> ${task.status}</p>
+                      <p style="margin: 5px 0;"><strong>Priority:</strong> ${task.priority}</p>
+                      ${task.dueDate ? `<p style="margin: 5px 0;"><strong>Due Date:</strong> ${new Date(task.dueDate).toLocaleDateString()}</p>` : ''}
+                      ${creator ? `<p style="margin: 5px 0;"><strong>Assigned by:</strong> ${creator.name || creator.email}</p>` : ''}
+                    </div>
+                    <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/tasks/${task.id}" style="background-color: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">View Task</a></p>
+                    <p style="color: #666; font-size: 12px; margin-top: 20px;">This is an automated notification from the Project Tracker system.</p>
+                  </div>
+                `
+                await microsoftGraphClient.sendEmail(assigneeUser.email, null, emailSubject, emailBody)
+                console.log(`Task assignment email sent to ${assigneeUser.email} for task "${task.title}"`)
+              } catch (emailError: any) {
+                console.error(`Failed to send task assignment email to ${assigneeUser.email}:`, emailError.message)
+                // Don't fail the request if email fails
+              }
+            })
+
+          await Promise.all(assigneeNotifications)
+        }
+      })
     )
 
     // Return all created tasks
@@ -1262,6 +1321,73 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     if (!req.userId) {
       return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    // Check if assignees were updated and send emails to new assignees
+    if (Array.isArray(assignees) && updatedTask.assignees) {
+      const oldAssigneeIds = new Set(oldTask.assignees?.map(a => a.userId) || [])
+      const newAssigneeIds = new Set(updatedTask.assignees.map(a => a.userId))
+      
+      // Find newly assigned users (in new list but not in old list)
+      const newlyAssigned = updatedTask.assignees.filter(
+        assignee => !oldAssigneeIds.has(assignee.userId) && assignee.userId !== req.userId
+      )
+
+      if (newlyAssigned.length > 0) {
+        // Get creator/updater info
+        const updater = await prisma.user.findUnique({
+          where: { id: req.userId },
+          select: { name: true, email: true },
+        })
+
+        // Create notifications and send emails to newly assigned users
+        await Promise.all(
+          newlyAssigned.map(async (assignee) => {
+            const assigneeUser = assignee.user
+            if (!assigneeUser || !assigneeUser.email) return
+
+            // Create notification
+            await prisma.notification.create({
+              data: {
+                userId: assignee.userId,
+                type: 'TASK_ASSIGNED',
+                title: 'Task Assigned',
+                message: `You have been assigned to task "${updatedTask.title}"${updatedTask.project ? ` in project "${updatedTask.project.name}"` : ''}`,
+                link: `/tasks/${updatedTask.id}`,
+              },
+            })
+
+            // Send email notification
+            try {
+              const { microsoftGraphClient } = await import('../lib/microsoft-graph')
+              const emailSubject = `Task Assigned: ${updatedTask.title}`
+              const emailBody = `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                  <h2 style="color: #333;">Task Assigned</h2>
+                  <p>Hello ${assigneeUser.name || assigneeUser.email},</p>
+                  <p>You have been assigned to a task:</p>
+                  <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                    <p style="margin: 5px 0;"><strong>Task:</strong> ${updatedTask.title}</p>
+                    ${updatedTask.description ? `<p style="margin: 5px 0;"><strong>Description:</strong> ${updatedTask.description}</p>` : ''}
+                    ${updatedTask.project ? `<p style="margin: 5px 0;"><strong>Project:</strong> ${updatedTask.project.name}</p>` : ''}
+                    <p style="margin: 5px 0;"><strong>Status:</strong> ${updatedTask.status}</p>
+                    <p style="margin: 5px 0;"><strong>Priority:</strong> ${updatedTask.priority}</p>
+                    ${updatedTask.dueDate ? `<p style="margin: 5px 0;"><strong>Due Date:</strong> ${new Date(updatedTask.dueDate).toLocaleDateString()}</p>` : ''}
+                    ${updater ? `<p style="margin: 5px 0;"><strong>Assigned by:</strong> ${updater.name || updater.email}</p>` : ''}
+                  </div>
+                  <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/tasks/${updatedTask.id}" style="background-color: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">View Task</a></p>
+                  <p style="color: #666; font-size: 12px; margin-top: 20px;">This is an automated notification from the Project Tracker system.</p>
+                </div>
+              `
+              await microsoftGraphClient.sendEmail(assigneeUser.email, null, emailSubject, emailBody)
+              console.log(`Task assignment email sent to ${assigneeUser.email} for task "${updatedTask.title}"`)
+            } catch (emailError: any) {
+              console.error(`Failed to send task assignment email to ${assigneeUser.email}:`, emailError.message)
+              // Don't fail the request if email fails
+            }
+          })
+        )
+      }
     }
 
     const changes: string[] = []
