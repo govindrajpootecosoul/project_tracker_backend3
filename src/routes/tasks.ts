@@ -2,6 +2,7 @@ import { Router, Response } from 'express'
 import { prisma } from '../lib/prisma'
 import { authMiddleware, AuthRequest } from '../middleware/auth'
 import { logActivity } from '../utils/activityLogger'
+import { TaskReviewStatus } from '@prisma/client'
 
 const router = Router()
 
@@ -567,7 +568,7 @@ router.get('/review', authMiddleware, async (req: AuthRequest, res: Response) =>
     const where = {
       reviewerId: req.userId,
       reviewStatus: {
-        in: ['REVIEW_REQUESTED', 'UNDER_REVIEW'],
+        in: [TaskReviewStatus.REVIEW_REQUESTED, TaskReviewStatus.UNDER_REVIEW],
       },
     }
 
@@ -1021,7 +1022,7 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
         imageCount: parseCount(imageCount),
         videoCount: parseCount(videoCount),
         link: link && link.trim() !== '' ? link.trim() : null,
-        createdById: req.userId,
+        createdById: req.userId!,
         assignees: {
           create: assigneeList,
         },
@@ -1073,7 +1074,7 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
             status: task.status,
             priority: task.priority,
           },
-          userId: req.userId,
+          userId: req.userId!,
         })
       )
     )
