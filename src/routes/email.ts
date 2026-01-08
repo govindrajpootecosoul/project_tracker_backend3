@@ -6,22 +6,22 @@ import { logActivity } from '../utils/activityLogger'
 
 const router = Router()
 
-// Helper function to send department-wise task email (reusable for manual and automatic)
+// Helper function to send department-wise task email for a SINGLE department (reusable for manual and automatic)
 export async function sendDepartmentWiseEmail(
-  departmentNames: string[],
+  departmentName: string,
   toEmails: string[],
   onLeaveMemberIds: string[] = [],
   userId?: string
 ): Promise<{ success: boolean; error?: string; emailLogId?: string }> {
   try {
-    if (!departmentNames || departmentNames.length === 0) {
-      return { success: false, error: 'At least one department is required' }
+    if (!departmentName || !departmentName.trim()) {
+      return { success: false, error: 'Department name is required' }
     }
 
-    // Get all users from selected departments
+    // Get all users from the specified department
     const departmentUsers = await prisma.user.findMany({
       where: {
-        department: { in: departmentNames },
+        department: departmentName,
         isActive: true,
       },
       select: {
@@ -34,12 +34,29 @@ export async function sendDepartmentWiseEmail(
 
     const departmentUserIds = departmentUsers.map((u) => u.id)
 
-    // Fetch IN_PROGRESS and RECURRING tasks from department members
+    // Get start and end of current date for filtering completed tasks
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const tomorrow = new Date(today)
+    tomorrow.setDate(tomorrow.getDate() + 1)
+
+    // Fetch IN_PROGRESS, RECURRING, and COMPLETED (from today) tasks from department members
     const tasks = await prisma.task.findMany({
       where: {
-        status: {
-          in: ['IN_PROGRESS', 'RECURRING'],
-        },
+        OR: [
+          {
+            status: {
+              in: ['IN_PROGRESS', 'RECURRING'],
+            },
+          },
+          {
+            status: 'COMPLETED',
+            statusUpdatedAt: {
+              gte: today,
+              lt: tomorrow,
+            },
+          },
+        ],
         assignees: {
           some: {
             userId: {
@@ -69,9 +86,10 @@ export async function sendDepartmentWiseEmail(
           },
         },
       },
-      orderBy: {
-        createdAt: 'desc',
-      },
+      orderBy: [
+        { statusUpdatedAt: 'desc' },
+        { createdAt: 'desc' },
+      ],
     })
 
     // Helper function to escape HTML
@@ -96,68 +114,48 @@ export async function sendDepartmentWiseEmail(
       }
     }
 
-    // Group tasks by department, then by employee
-    const tasksByDepartment = new Map<string, Map<string, { user: any; tasks: any[] }>>()
+    // Group tasks by employee
+    const tasksByEmployee = new Map<string, { user: any; tasks: any[] }>()
     const isNewProductDesignDepartment = (value?: string | null) => {
       return value?.trim().toLowerCase() === 'new product design'
     }
 
-    // Initialize all departments and all department members
-    departmentNames.forEach((deptName) => {
-      const deptMembers = departmentUsers.filter((u) => u.department === deptName)
-      const deptTasksMap = new Map<string, { user: any; tasks: any[] }>()
-      deptMembers.forEach((member) => {
-        deptTasksMap.set(member.id, { user: member, tasks: [] })
-      })
-      tasksByDepartment.set(deptName, deptTasksMap)
+    // Initialize all department members
+    departmentUsers.forEach((member) => {
+      tasksByEmployee.set(member.id, { user: member, tasks: [] })
     })
 
-    // Add tasks to their respective departments and employees
+    // Add tasks to their respective employees
     tasks.forEach((task: any) => {
       task.assignees.forEach((assignee: any) => {
-        const userDept = assignee.user.department
-        if (userDept && departmentNames.includes(userDept)) {
-          const deptMap = tasksByDepartment.get(userDept)
-          if (deptMap) {
-            const userId = assignee.user.id
-            if (!deptMap.has(userId)) {
-              deptMap.set(userId, { user: assignee.user, tasks: [] })
-            }
-            const employeeData = deptMap.get(userId)!
-            if (!employeeData.tasks.find((t) => t.id === task.id)) {
-              employeeData.tasks.push(task)
-            }
+        const userId = assignee.user.id
+        if (tasksByEmployee.has(userId)) {
+          const employeeData = tasksByEmployee.get(userId)!
+          if (!employeeData.tasks.find((t) => t.id === task.id)) {
+            employeeData.tasks.push(task)
           }
         }
       })
     })
 
-    // Check if any department has media columns
+    // Check if department has media columns
     const includeMediaColumns =
-      departmentNames.some((dept) => isNewProductDesignDepartment(dept)) ||
+      isNewProductDesignDepartment(departmentName) ||
       tasks.some((task: any) => isNewProductDesignDepartment(task.project?.department))
 
-    // Generate report HTML grouped by department
+    // Generate report HTML
     let reportContent = ''
-    let totalEmployees = 0
-    let totalTasks = tasks.length
+    const totalEmployees = departmentUsers.length
+    const totalTasks = tasks.length
 
-    departmentNames.forEach((deptName) => {
-      const deptMap = tasksByDepartment.get(deptName)
-      if (!deptMap) return
+    // Sort employees by name
+    const sortedEmployees = Array.from(tasksByEmployee.values()).sort((a, b) => {
+      const nameA = (a.user.name || a.user.email || '').toLowerCase()
+      const nameB = (b.user.name || b.user.email || '').toLowerCase()
+      return nameA.localeCompare(nameB)
+    })
 
-      const deptMembers = Array.from(deptMap.values())
-      totalEmployees += deptMembers.length
-
-      // Sort employees by name
-      const sortedEmployees = deptMembers.sort((a, b) => {
-        const nameA = (a.user.name || a.user.email || '').toLowerCase()
-        const nameB = (b.user.name || b.user.email || '').toLowerCase()
-        return nameA.localeCompare(nameB)
-      })
-
-      let deptContent = ''
-      sortedEmployees.forEach((employeeData) => {
+    sortedEmployees.forEach((employeeData) => {
         const { user, tasks: employeeTasks } = employeeData
         const userName = user.name || 'Unknown'
         const userEmail = user.email || 'N/A'
@@ -181,82 +179,77 @@ export async function sendDepartmentWiseEmail(
                 const taskLink = task.link
                   ? `<a href="${escapeHtml(task.link)}" target="_blank" style="color: #006ba6; text-decoration: underline;">${escapeHtml(task.link)}</a>`
                   : '-'
+                const taskStatus = escapeHtml(task.status || 'N/A')
+                const isCompleted = task.status === 'COMPLETED'
+                // Green background for entire row if task is completed
+                const rowBackgroundColor = isCompleted ? '#d4edda' : rowColor
+                const statusColor = isCompleted ? '#155724' : '#006ba6'
+                const statusStyle = isCompleted ? `color: #155724; font-weight: bold;` : `color: ${statusColor};`
 
                 return `
-                  <tr style="background-color: ${rowColor};">
-                    <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${brand}</td>
-                    <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${projectName}</td>
+                  <tr style="background-color: ${rowBackgroundColor};">
+                    <td style="padding: 8px; border: 1px solid #ddd; width: 15%; word-wrap: break-word;">${brand}</td>
+                    <td style="padding: 8px; border: 1px solid #ddd; width: 15%; word-wrap: break-word;">${projectName}</td>
                     <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${taskTitle}</td>
-                    <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${priority}</td>
-                    <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${dueDate}</td>
-                    ${includeMediaColumns ? `<td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${imageCount}</td>` : ''}
-                    ${includeMediaColumns ? `<td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${videoCount}</td>` : ''}
-                    <td style="padding: 8px; border: 1px solid #ddd; width: 15%; word-wrap: break-word;">${taskLink}</td>
+                    <td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word; ${statusStyle}">${taskStatus}</td>
+                    <td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${priority}</td>
+                    <td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${dueDate}</td>
+                    ${includeMediaColumns ? `<td style="padding: 8px; border: 1px solid #ddd; width: 8%; word-wrap: break-word;">${imageCount}</td>` : ''}
+                    ${includeMediaColumns ? `<td style="padding: 8px; border: 1px solid #ddd; width: 8%; word-wrap: break-word;">${videoCount}</td>` : ''}
+                    <td style="padding: 8px; border: 1px solid #ddd; width: 12%; word-wrap: break-word;">${taskLink}</td>
                   </tr>
                 `
               }).join('')
             : isOnLeave
-            ? `<tr><td colspan="${includeMediaColumns ? 8 : 6}" style="padding: 8px; border: 1px solid #ddd; text-align: center; color: #ff0000; font-weight: bold;">On Leave</td></tr>`
-            : `<tr><td colspan="${includeMediaColumns ? 8 : 6}" style="padding: 8px; border: 1px solid #ddd; text-align: center; color: #666; font-style: italic;">No tasks assigned</td></tr>`
+            ? `<tr><td colspan="${includeMediaColumns ? 9 : 7}" style="padding: 8px; border: 1px solid #ddd; text-align: center; color: #ff0000; font-weight: bold;">On Leave</td></tr>`
+            : `<tr><td colspan="${includeMediaColumns ? 9 : 7}" style="padding: 8px; border: 1px solid #ddd; text-align: center; color: #666; font-style: italic;">No tasks assigned</td></tr>`
 
-        deptContent += `
-          <div style="margin-bottom: 30px; border-left: 5px solid #006ba6; padding-left: 15px;">
-            <h3 style="color: #b1740f; font-family: Arial, sans-serif; font-size: 16px; margin-bottom: 10px; font-weight: bold;">
-              ${escapeHtml(userName)} (${escapeHtml(userEmail)})${isOnLeave ? ' - <span style="color: #ff0000;">On Leave</span>' : ''}
-            </h3>
-            ${!isOnLeave
-              ? `<p style="color: #666; font-family: Arial, sans-serif; font-size: 14px; margin-bottom: 10px;">
-              Total Tasks: ${employeeTasks.length}
-            </p>`
-              : `<p style="color: #ff0000; font-family: Arial, sans-serif; font-size: 14px; margin-bottom: 10px; font-weight: bold;">
-              This team member is currently on leave.
-            </p>`}
-            <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; font-size: 14px; table-layout: fixed;">
-              <thead>
-                <tr style="background-color: #006ba6; color: white;">
-                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Brand</th>
-                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Project</th>
-                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Task Title</th>
-                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Priority</th>
-                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Due Date</th>
-                  ${includeMediaColumns ? '<th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 10%;">Images</th>' : ''}
-                  ${includeMediaColumns ? '<th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 10%;">Videos</th>' : ''}
-                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 15%;">Link</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${taskRows}
-              </tbody>
-            </table>
-          </div>
-        `
-      })
-
-      if (deptContent) {
-        reportContent += `
-          <div style="margin-bottom: 40px; border-top: 3px solid #006ba6; padding-top: 20px;">
-            <h2 style="color: #006ba6; font-family: Arial, sans-serif; font-size: 20px; margin-bottom: 20px; font-weight: bold;">
-              ${escapeHtml(deptName)}
-            </h2>
-            ${deptContent}
-          </div>
-        `
-      }
+      reportContent += `
+        <div style="margin-bottom: 30px; border-left: 5px solid #006ba6; padding-left: 15px;">
+          <h3 style="color: #b1740f; font-family: Arial, sans-serif; font-size: 16px; margin-bottom: 10px; font-weight: bold;">
+            ${escapeHtml(userName)} (${escapeHtml(userEmail)})${isOnLeave ? ' - <span style="color: #ff0000;">On Leave</span>' : ''}
+          </h3>
+          ${!isOnLeave
+            ? `<p style="color: #666; font-family: Arial, sans-serif; font-size: 14px; margin-bottom: 10px;">
+            Total Tasks: ${employeeTasks.length}
+          </p>`
+            : `<p style="color: #ff0000; font-family: Arial, sans-serif; font-size: 14px; margin-bottom: 10px; font-weight: bold;">
+            This team member is currently on leave.
+          </p>`}
+          <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; font-size: 14px; table-layout: fixed;">
+            <thead>
+              <tr style="background-color: #006ba6; color: white;">
+                <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 15%;">Brand</th>
+                <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 15%;">Project</th>
+                <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Task Title</th>
+                <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 10%;">Status</th>
+                <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 10%;">Priority</th>
+                <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 10%;">Due Date</th>
+                ${includeMediaColumns ? '<th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 8%;">Images</th>' : ''}
+                ${includeMediaColumns ? '<th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 8%;">Videos</th>' : ''}
+                <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 12%;">Link</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${taskRows}
+            </tbody>
+          </table>
+        </div>
+      `
     })
 
     // Generate subject
-    const departmentsText = departmentNames.length === 1 ? departmentNames[0] : `${departmentNames.length} Departments`
     const finalSubject =
       totalTasks > 0
-        ? `${departmentsText} In-Progress & Recurring Tasks Report - ${totalEmployees} Employee${totalEmployees !== 1 ? 's' : ''}, ${totalTasks} Task${totalTasks !== 1 ? 's' : ''}`
-        : `${departmentsText} In-Progress & Recurring Tasks Report - 0 Employees, 0 Tasks`
+        ? `${departmentName} Tasks Report (In-Progress, Recurring & Today's Completed) - ${totalEmployees} Employee${totalEmployees !== 1 ? 's' : ''}, ${totalTasks} Task${totalTasks !== 1 ? 's' : ''}`
+        : `${departmentName} Tasks Report (In-Progress, Recurring & Today's Completed) - 0 Employees, 0 Tasks`
 
     // Generate tasks report HTML
     let tasksReportHTML = ''
     if (tasks.length === 0) {
       tasksReportHTML = `
         <div style="background-color: #006ba6; color: white; padding: 20px; text-align: center; margin-bottom: 20px;">
-          <h2 style="margin: 0; font-family: Arial, sans-serif; font-size: 24px;">In-Progress & Recurring Tasks Report</h2>
+          <h2 style="margin: 0; font-family: Arial, sans-serif; font-size: 24px;">Tasks Report (In-Progress, Recurring & Today's Completed)</h2>
         </div>
         <div style="margin-bottom: 20px; font-family: Arial, sans-serif;">
           <p style="font-size: 14px; color: #333;">
@@ -264,14 +257,14 @@ export async function sendDepartmentWiseEmail(
             <strong>Total Tasks:</strong> 0
           </p>
           <p style="font-size: 14px; color: #666; margin-top: 10px;">
-            No in-progress or recurring tasks found for the selected departments.
+            No in-progress, recurring, or today's completed tasks found for ${departmentName}.
           </p>
         </div>
       `
     } else {
       tasksReportHTML = `
         <div style="background-color: #006ba6; color: white; padding: 20px; text-align: center; margin-bottom: 20px;">
-          <h2 style="margin: 0; font-family: Arial, sans-serif; font-size: 24px;">In-Progress & Recurring Tasks Report</h2>
+          <h2 style="margin: 0; font-family: Arial, sans-serif; font-size: 24px;">Tasks Report (In-Progress, Recurring & Today's Completed)</h2>
         </div>
         <div style="margin-bottom: 20px; font-family: Arial, sans-serif;">
           <p style="font-size: 14px; color: #333;">
@@ -320,7 +313,7 @@ export async function sendDepartmentWiseEmail(
           subject: finalSubject,
           to: toEmails,
           cc: ccEmails,
-          departments: departmentNames,
+          department: departmentName,
           automatic: !userId || userId === 'system',
         },
         userId: userId,
@@ -404,12 +397,29 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
 
         const departmentUserIds = departmentUsers.map((u: any) => u.id)
 
-        // Fetch IN_PROGRESS and RECURRING tasks from department members
+        // Get start and end of current date for filtering completed tasks
+        const today = new Date()
+        today.setHours(0, 0, 0, 0)
+        const tomorrow = new Date(today)
+        tomorrow.setDate(tomorrow.getDate() + 1)
+
+        // Fetch IN_PROGRESS, RECURRING, and COMPLETED (from today) tasks from department members
         tasks = await prisma.task.findMany({
           where: {
-            status: {
-              in: ['IN_PROGRESS', 'RECURRING'],
-            },
+            OR: [
+              {
+                status: {
+                  in: ['IN_PROGRESS', 'RECURRING'],
+                },
+              },
+              {
+                status: 'COMPLETED',
+                statusUpdatedAt: {
+                  gte: today,
+                  lt: tomorrow,
+                },
+              },
+            ],
             assignees: {
               some: {
                 userId: {
@@ -439,18 +449,36 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
             },
           },
           // brand is a scalar field, automatically included
-          orderBy: {
-            createdAt: 'desc',
-          },
+      orderBy: [
+        { statusUpdatedAt: 'desc' },
+        { createdAt: 'desc' },
+      ],
         })
       }
     } else {
-      // Fetch user's own IN_PROGRESS and RECURRING tasks
+      // Get start and end of current date for filtering completed tasks
+      const today = new Date()
+      today.setHours(0, 0, 0, 0)
+      const tomorrow = new Date(today)
+      tomorrow.setDate(tomorrow.getDate() + 1)
+
+      // Fetch user's own IN_PROGRESS, RECURRING, and today's COMPLETED tasks
       tasks = await prisma.task.findMany({
         where: {
-          status: {
-            in: ['IN_PROGRESS', 'RECURRING'],
-          },
+          OR: [
+            {
+              status: {
+                in: ['IN_PROGRESS', 'RECURRING'],
+              },
+            },
+            {
+              status: 'COMPLETED',
+              statusUpdatedAt: {
+                gte: today,
+                lt: tomorrow,
+              },
+            },
+          ],
           assignees: {
             some: {
               userId: req.userId,
@@ -477,9 +505,10 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
           },
           // brand is a scalar field, automatically included
         },
-        orderBy: {
-          createdAt: 'desc',
-        },
+        orderBy: [
+          { statusUpdatedAt: 'desc' },
+          { createdAt: 'desc' },
+        ],
       })
     }
 
@@ -624,34 +653,41 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
         const isOnLeave = includeDepartmentTasks && onLeaveMemberIds && Array.isArray(onLeaveMemberIds) && onLeaveMemberIds.includes(user.id)
         
         const taskRows = !isOnLeave && employeeTasks.length > 0 ? employeeTasks.map((task: any, index: number) => {
-          const rowColor = index % 2 === 0 ? '#f9f9f9' : '#ffffff'
+          const baseRowColor = index % 2 === 0 ? '#f9f9f9' : '#ffffff'
+          const isCompleted = task.status === 'COMPLETED'
+          // Green background for entire row if task is completed
+          const rowColor = isCompleted ? '#d4edda' : baseRowColor
           const brand = escapeHtml(task.brand || 'N/A')
           const projectName = escapeHtml(task.project?.name || 'N/A')
           const taskTitle = escapeHtml(task.title)
           const priority = escapeHtml(task.priority || 'N/A')
           const dueDate = formatDate(task.dueDate)
+          const taskStatus = escapeHtml(task.status || 'N/A')
           const showMediaCounts =
             includeMediaColumns &&
             (isNewProductDesignDepartment(task.project?.department) || isNewProductDesignDepartment(currentUser?.department))
           const imageCount = showMediaCounts ? Number(task.imageCount ?? 0) : '-'
           const videoCount = showMediaCounts ? Number(task.videoCount ?? 0) : '-'
           const taskLink = task.link ? `<a href="${escapeHtml(task.link)}" target="_blank" style="color: #006ba6; text-decoration: underline;">${escapeHtml(task.link)}</a>` : '-'
+          const statusColor = isCompleted ? '#155724' : '#006ba6'
+          const statusStyle = isCompleted ? `color: #155724; font-weight: bold;` : `color: ${statusColor};`
           
           return `
             <tr style="background-color: ${rowColor};">
-              <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${brand}</td>
-              <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${projectName}</td>
+              <td style="padding: 8px; border: 1px solid #ddd; width: 15%; word-wrap: break-word;">${brand}</td>
+              <td style="padding: 8px; border: 1px solid #ddd; width: 15%; word-wrap: break-word;">${projectName}</td>
               <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${taskTitle}</td>
-              <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${priority}</td>
-              <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${dueDate}</td>
-              ${includeMediaColumns ? `<td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${imageCount}</td>` : ''}
-              ${includeMediaColumns ? `<td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${videoCount}</td>` : ''}
-              <td style="padding: 8px; border: 1px solid #ddd; width: 15%; word-wrap: break-word;">${taskLink}</td>
+              <td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word; ${statusStyle}">${taskStatus}</td>
+              <td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${priority}</td>
+              <td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${dueDate}</td>
+              ${includeMediaColumns ? `<td style="padding: 8px; border: 1px solid #ddd; width: 8%; word-wrap: break-word;">${imageCount}</td>` : ''}
+              ${includeMediaColumns ? `<td style="padding: 8px; border: 1px solid #ddd; width: 8%; word-wrap: break-word;">${videoCount}</td>` : ''}
+              <td style="padding: 8px; border: 1px solid #ddd; width: 12%; word-wrap: break-word;">${taskLink}</td>
             </tr>
           `
         }).join('') : isOnLeave 
-          ? `<tr><td colspan="${includeMediaColumns ? 8 : 6}" style="padding: 8px; border: 1px solid #ddd; text-align: center; color: #ff0000; font-weight: bold;">On Leave</td></tr>`
-          : `<tr><td colspan="${includeMediaColumns ? 8 : 6}" style="padding: 8px; border: 1px solid #ddd; text-align: center; color: #666; font-style: italic;">No tasks assigned</td></tr>`
+          ? `<tr><td colspan="${includeMediaColumns ? 9 : 7}" style="padding: 8px; border: 1px solid #ddd; text-align: center; color: #ff0000; font-weight: bold;">On Leave</td></tr>`
+          : `<tr><td colspan="${includeMediaColumns ? 9 : 7}" style="padding: 8px; border: 1px solid #ddd; text-align: center; color: #666; font-style: italic;">No tasks assigned</td></tr>`
 
         reportContent += `
           <div style="margin-bottom: 30px; border-left: 5px solid #006ba6; padding-left: 15px;">
@@ -666,14 +702,15 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
             <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; font-size: 14px; table-layout: fixed;">
               <thead>
                 <tr style="background-color: #006ba6; color: white;">
-                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Brand</th>
-                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Project</th>
+                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 15%;">Brand</th>
+                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 15%;">Project</th>
                   <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Task Title</th>
-                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Priority</th>
-                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 20%;">Due Date</th>
-                  ${includeMediaColumns ? '<th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 10%;">Images</th>' : ''}
-                  ${includeMediaColumns ? '<th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 10%;">Videos</th>' : ''}
-                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 15%;">Link</th>
+                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 10%;">Status</th>
+                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 10%;">Priority</th>
+                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 10%;">Due Date</th>
+                  ${includeMediaColumns ? '<th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 8%;">Images</th>' : ''}
+                  ${includeMediaColumns ? '<th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 8%;">Videos</th>' : ''}
+                  <th style="text-align: left; padding: 10px; border: 1px solid #ddd; width: 12%;">Link</th>
                 </tr>
               </thead>
               <tbody>
@@ -762,18 +799,54 @@ router.get('/admin/auto-email-config', authMiddleware, async (req: AuthRequest, 
     }
 
     // Get or create default config
-    let config = await prisma.autoEmailConfig.findFirst()
-    if (!config) {
-      config = await prisma.autoEmailConfig.create({
-        data: {
-          enabled: false,
-          departments: [],
-          daysOfWeek: [],
-          timeOfDay: '18:00',
-          timezone: 'Asia/Kolkata',
-          sendWhenEmpty: false,
+    let config: any
+    try {
+      // Try to include departmentConfigs (if Prisma client is up to date)
+      config = await prisma.autoEmailConfig.findFirst({
+        include: {
+          departmentConfigs: true,
         },
       })
+    } catch (error: any) {
+      // Fallback if relation doesn't exist yet (Prisma client not regenerated)
+      console.warn('DepartmentConfigs relation not available, using fallback:', error.message)
+      config = await prisma.autoEmailConfig.findFirst()
+      if (config) {
+        // Add empty departmentConfigs array for compatibility
+        config.departmentConfigs = []
+      }
+    }
+    
+    if (!config) {
+      try {
+        config = await prisma.autoEmailConfig.create({
+          data: {
+            enabled: false,
+            toEmails: ['priyanka.aeron@ecosoulhome.com', 'charu.anand@ecosoulhome.com'],
+            timezone: 'Asia/Kolkata',
+            sendWhenEmpty: false,
+          },
+          include: {
+            departmentConfigs: true,
+          },
+        })
+      } catch (error: any) {
+        // Fallback if relation doesn't exist yet
+        config = await prisma.autoEmailConfig.create({
+          data: {
+            enabled: false,
+            toEmails: ['priyanka.aeron@ecosoulhome.com', 'charu.anand@ecosoulhome.com'],
+            timezone: 'Asia/Kolkata',
+            sendWhenEmpty: false,
+          },
+        })
+        config.departmentConfigs = []
+      }
+    }
+
+    // Ensure departmentConfigs exists (for backward compatibility)
+    if (!config.departmentConfigs) {
+      config.departmentConfigs = []
     }
 
     res.json(config)
@@ -800,7 +873,7 @@ router.post('/admin/auto-email-config', authMiddleware, async (req: AuthRequest,
       return res.status(403).json({ error: 'Only super admins can update auto-email config' })
     }
 
-    const { enabled, toEmails, departments, daysOfWeek, timeOfDay, timezone, sendWhenEmpty } = req.body
+    const { enabled, toEmails, timezone, sendWhenEmpty, departmentConfigs } = req.body
 
     // Validate required fields if enabled
     if (enabled) {
@@ -813,22 +886,28 @@ router.post('/admin/auto-email-config', authMiddleware, async (req: AuthRequest,
       if (invalidEmails.length > 0) {
         return res.status(400).json({ error: `Invalid email format: ${invalidEmails.join(', ')}` })
       }
-      if (!departments || !Array.isArray(departments) || departments.length === 0) {
-        return res.status(400).json({ error: 'At least one department is required when enabled' })
+      if (!departmentConfigs || !Array.isArray(departmentConfigs) || departmentConfigs.length === 0) {
+        return res.status(400).json({ error: 'At least one department configuration is required when enabled' })
       }
-      if (!daysOfWeek || !Array.isArray(daysOfWeek) || daysOfWeek.length === 0) {
-        return res.status(400).json({ error: 'At least one day of week is required when enabled' })
-      }
-      if (!timeOfDay || typeof timeOfDay !== 'string' || !/^([0-1][0-9]|2[0-3]):[0-5][0-9]$/.test(timeOfDay)) {
-        return res.status(400).json({ error: 'Valid time of day (HH:MM) is required when enabled' })
-      }
-    }
-
-    // Validate daysOfWeek (0-6)
-    if (daysOfWeek && Array.isArray(daysOfWeek)) {
-      const invalidDays = daysOfWeek.filter((day: any) => typeof day !== 'number' || day < 0 || day > 6)
-      if (invalidDays.length > 0) {
-        return res.status(400).json({ error: 'Days of week must be numbers between 0 (Sunday) and 6 (Saturday)' })
+      
+      // Validate each department config
+      for (const deptConfig of departmentConfigs) {
+        if (!deptConfig.department || typeof deptConfig.department !== 'string') {
+          return res.status(400).json({ error: 'Each department config must have a department name' })
+        }
+        if (deptConfig.enabled) {
+          if (!deptConfig.daysOfWeek || !Array.isArray(deptConfig.daysOfWeek) || deptConfig.daysOfWeek.length === 0) {
+            return res.status(400).json({ error: `Department ${deptConfig.department}: At least one day of week is required when enabled` })
+          }
+          if (!deptConfig.timeOfDay || typeof deptConfig.timeOfDay !== 'string' || !/^([0-1][0-9]|2[0-3]):[0-5][0-9]$/.test(deptConfig.timeOfDay)) {
+            return res.status(400).json({ error: `Department ${deptConfig.department}: Valid time of day (HH:MM) is required when enabled` })
+          }
+          // Validate daysOfWeek (0-6)
+          const invalidDays = deptConfig.daysOfWeek.filter((day: any) => typeof day !== 'number' || day < 0 || day > 6)
+          if (invalidDays.length > 0) {
+            return res.status(400).json({ error: `Department ${deptConfig.department}: Days of week must be numbers between 0 (Sunday) and 6 (Saturday)` })
+          }
+        }
       }
     }
 
@@ -841,9 +920,6 @@ router.post('/admin/auto-email-config', authMiddleware, async (req: AuthRequest,
         data: {
           enabled: enabled ?? config.enabled,
           toEmails: toEmails !== undefined ? toEmails.map((email: string) => email.trim().toLowerCase()) : config.toEmails,
-          departments: departments ?? config.departments,
-          daysOfWeek: daysOfWeek ?? config.daysOfWeek,
-          timeOfDay: timeOfDay ?? config.timeOfDay,
           timezone: timezone ?? config.timezone,
           sendWhenEmpty: sendWhenEmpty ?? config.sendWhenEmpty,
         },
@@ -855,16 +931,77 @@ router.post('/admin/auto-email-config', authMiddleware, async (req: AuthRequest,
         data: {
           enabled: enabled ?? false,
           toEmails: toEmails ? toEmails.map((email: string) => email.trim().toLowerCase()) : defaultToEmails,
-          departments: departments ?? [],
-          daysOfWeek: daysOfWeek ?? [],
-          timeOfDay: timeOfDay ?? '18:00',
           timezone: timezone ?? 'Asia/Kolkata',
           sendWhenEmpty: sendWhenEmpty ?? false,
         },
       })
     }
 
-    res.json(config)
+    // Create/update department configs
+    if (departmentConfigs && Array.isArray(departmentConfigs)) {
+      try {
+        // Delete all existing department configs
+        await prisma.autoEmailDepartmentConfig.deleteMany({
+          where: { configId: config.id },
+        })
+      } catch (error: any) {
+        // If model doesn't exist yet, just continue
+        console.warn('AutoEmailDepartmentConfig model not available:', error.message)
+      }
+
+      // Create new department configs
+      for (const deptConfig of departmentConfigs) {
+        try {
+          await prisma.autoEmailDepartmentConfig.upsert({
+            where: {
+              configId_department: {
+                configId: config.id,
+                department: deptConfig.department,
+              },
+            },
+            update: {
+              enabled: deptConfig.enabled ?? true,
+              daysOfWeek: deptConfig.daysOfWeek ?? [],
+              timeOfDay: deptConfig.timeOfDay ?? '18:00',
+            },
+            create: {
+              configId: config.id,
+              department: deptConfig.department,
+              enabled: deptConfig.enabled ?? true,
+              daysOfWeek: deptConfig.daysOfWeek ?? [],
+              timeOfDay: deptConfig.timeOfDay ?? '18:00',
+            },
+          })
+        } catch (error: any) {
+          console.error(`Error upserting department config for ${deptConfig.department}:`, error.message)
+          // Continue with other departments even if one fails
+        }
+      }
+    }
+
+    // Return updated config with department configs
+    let updatedConfig: any
+    try {
+      updatedConfig = await prisma.autoEmailConfig.findUnique({
+        where: { id: config.id },
+        include: {
+          departmentConfigs: true,
+        },
+      })
+    } catch (error: any) {
+      // Fallback if relation doesn't exist
+      updatedConfig = await prisma.autoEmailConfig.findUnique({
+        where: { id: config.id },
+      })
+      updatedConfig.departmentConfigs = []
+    }
+
+    // Ensure departmentConfigs exists
+    if (!updatedConfig.departmentConfigs) {
+      updatedConfig.departmentConfigs = []
+    }
+
+    res.json(updatedConfig)
   } catch (error: any) {
     console.error('Error updating auto-email config:', error)
     res.status(500).json({ error: error.message || 'Internal server error' })

@@ -93,6 +93,7 @@ model Task {
   reviewerId String? @db.ObjectId // User who was requested to review (pending acceptance)
   reviewedById String? @db.ObjectId // User who reviewed
   reviewedAt DateTime? // When review was completed
+  statusUpdatedAt DateTime? // When status was last updated
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   createdById String   @db.ObjectId
@@ -474,16 +475,32 @@ model AutoEmailConfig {
   id            String   @id @default(auto()) @map("_id") @db.ObjectId
   enabled       Boolean  @default(false)
   toEmails      String[] @default(["priyanka.aeron@ecosoulhome.com", "charu.anand@ecosoulhome.com"]) // Array of recipient emails
-  departments   String[] // Array of department names
-  daysOfWeek    Int[]    // Array of day numbers (0=Sunday, 1=Monday, ..., 6=Saturday)
-  timeOfDay     String   // Time in HH:MM format (e.g., "18:00")
   timezone      String   @default("Asia/Kolkata")
   sendWhenEmpty Boolean  @default(false)
-  lastRunAt     DateTime? // Track last automatic send time
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  // Per-department configurations
+  departmentConfigs AutoEmailDepartmentConfig[]
+
+  @@map("auto_email_configs")
+}
+
+model AutoEmailDepartmentConfig {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  configId      String   @db.ObjectId
+  department    String   // Department name
+  enabled       Boolean  @default(true)
+  daysOfWeek    Int[]    // Array of day numbers (0=Sunday, 1=Monday, ..., 6=Saturday)
+  timeOfDay     String   // Time in HH:MM format (e.g., "18:00")
+  lastRunAt     DateTime? // Track last automatic send time for this department
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  @@map("auto_email_configs")
+  config        AutoEmailConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+
+  @@unique([configId, department])
+  @@map("auto_email_department_configs")
 }
 
 enum SubscriptionCollaborationStatus {

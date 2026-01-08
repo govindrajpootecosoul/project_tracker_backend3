@@ -12,6 +12,9 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
     return res.status(401).json({ error: 'Unauthorized' })
   }
 
+  const limit = parseInt(req.query.limit as string) || 20
+  const skip = parseInt(req.query.skip as string) || 0
+
   const currentUser = await prisma.user.findUnique({
     where: { id: req.userId },
     select: {
@@ -47,6 +50,9 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
   }
 
   try {
+    // Get total count first
+    const total = await prisma.project.count({ where: whereClause })
+
     // Try the full query first
     let projects
     try {
@@ -73,6 +79,8 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
         orderBy: {
           createdAt: 'desc',
         },
+        take: limit,
+        skip: skip,
       })
     } catch (queryError: any) {
       // If the query fails, try a simpler version
@@ -89,41 +97,49 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
         orderBy: {
           createdAt: 'desc',
         },
+        take: limit,
+        skip: skip,
       })
       
-      // Manually fetch members for each project
-      projects = await Promise.all(
-        projects.map(async (project: any) => {
-          try {
-            const members = await prisma.projectMember.findMany({
-              where: {
-                projectId: project.id,
-              },
-              include: {
-                user: {
-                  select: {
-                    id: true,
-                    name: true,
-                    email: true,
-                  },
-                },
-              },
-            })
-            return {
-              ...project,
-              members,
-            }
-          } catch {
-            return {
-              ...project,
-              members: [],
-            }
-          }
-        })
-      )
+      // Optimized: Batch fetch all members at once instead of N+1 queries
+      const projectIds = projects.map((p: any) => p.id)
+      const allMembers = await prisma.projectMember.findMany({
+        where: {
+          projectId: { in: projectIds },
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+        },
+      })
+      
+      // Group members by project
+      const membersByProject = new Map<string, any[]>()
+      allMembers.forEach(member => {
+        const projectId = member.projectId
+        if (!membersByProject.has(projectId)) {
+          membersByProject.set(projectId, [])
+        }
+        membersByProject.get(projectId)!.push(member)
+      })
+      
+      // Attach members to projects
+      projects = projects.map((project: any) => ({
+        ...project,
+        members: membersByProject.get(project.id) || [],
+      }))
     }
 
-    res.json(projects)
+    res.json({
+      projects,
+      total,
+      hasMore: skip + projects.length < total,
+    })
   } catch (error: any) {
     console.error('Error fetching projects:', error)
     console.error('Error stack:', error.stack)
@@ -132,6 +148,8 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
     // If error is due to inconsistent relations, try fetching without user relation
     if (error.message?.includes('Inconsistent query result') || error.message?.includes('Field user is required')) {
       try {
+        const total = await prisma.project.count({ where: whereClause })
+        
         const projects = await prisma.project.findMany({
           where: whereClause,
           include: {
@@ -153,6 +171,8 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
           orderBy: {
             createdAt: 'desc',
           },
+          take: limit,
+          skip: skip,
         })
 
         // Manually fetch users for each member
@@ -187,7 +207,11 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
           })
         )
 
-        res.json(projectsWithUsers)
+        res.json({
+          projects: projectsWithUsers,
+          total,
+          hasMore: skip + projectsWithUsers.length < total,
+        })
         return
       } catch (fallbackError: any) {
         console.error('Fallback query also failed:', fallbackError)

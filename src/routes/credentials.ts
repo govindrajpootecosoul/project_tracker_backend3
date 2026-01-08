@@ -17,38 +17,71 @@ const sanitizeIdArray = (input: unknown): string[] => {
 
 const COLLAB_ROLES = new Set(['viewer', 'editor'])
 
-// Get all credentials (user's own + shared)
+// Get all credentials (user's own + shared + public credentials from same department)
 router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     if (!req.userId) {
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const credentials = await prisma.credential.findMany({
-      where: {
-        OR: [
-          { createdById: req.userId },
-          { members: { some: { userId: req.userId } } },
+    const limit = parseInt(req.query.limit as string) || 20
+    const skip = parseInt(req.query.skip as string) || 0
+
+    // Get current user's department
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { department: true },
+    })
+
+    const department = currentUser?.department
+
+    // Build the where clause
+    const whereClause: any = {
+      OR: [
+        { createdById: req.userId },
+        { members: { some: { userId: req.userId } } },
+      ],
+    }
+
+    // If user has a department, also include public credentials from same department
+    if (department) {
+      whereClause.OR.push({
+        AND: [
+          { privacyLevel: 'PUBLIC' },
+          { createdBy: { department: department } },
         ],
-      },
-      include: {
-        createdBy: {
-          select: { id: true, name: true, email: true },
-        },
-        members: {
-          include: {
-            user: {
-              select: { id: true, name: true, email: true },
+      })
+    }
+
+    const [credentials, total] = await Promise.all([
+      prisma.credential.findMany({
+        where: whereClause,
+        include: {
+          createdBy: {
+            select: { id: true, name: true, email: true, department: true },
+          },
+          members: {
+            include: {
+              user: {
+                select: { id: true, name: true, email: true },
+              },
             },
           },
         },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    })
+        orderBy: {
+          createdAt: 'desc',
+        },
+        take: limit,
+        skip: skip,
+      }),
+      prisma.credential.count({ where: whereClause }),
+    ])
 
-    res.json(credentials)
+    res.json({
+      credentials,
+      total,
+      hasMore: skip + credentials.length < total,
+    })
   } catch (error) {
     console.error('Error fetching credentials:', error)
     res.status(500).json({ error: 'Internal server error' })
@@ -62,17 +95,38 @@ router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const credential = await prisma.credential.findFirst({
-      where: {
-        id: req.params.id,
-        OR: [
-          { createdById: req.userId },
-          { members: { some: { userId: req.userId } } },
+    // Get current user's department
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { department: true },
+    })
+
+    const department = currentUser?.department
+
+    // Build the where clause
+    const whereClause: any = {
+      id: req.params.id,
+      OR: [
+        { createdById: req.userId },
+        { members: { some: { userId: req.userId } } },
+      ],
+    }
+
+    // If user has a department, also include public credentials from same department
+    if (department) {
+      whereClause.OR.push({
+        AND: [
+          { privacyLevel: 'PUBLIC' },
+          { createdBy: { department: department } },
         ],
-      },
+      })
+    }
+
+    const credential = await prisma.credential.findFirst({
+      where: whereClause,
       include: {
         createdBy: {
-          select: { id: true, name: true, email: true },
+          select: { id: true, name: true, email: true, department: true },
         },
         members: {
           include: {
@@ -149,35 +203,106 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const credential = await prisma.credential.findFirst({
-      where: {
-        id: req.params.id,
-        OR: [
-          { createdById: req.userId },
-          { members: { some: { userId: req.userId, role: 'editor' } } },
-        ],
+    // First, check if credential exists (without permission check)
+    const credential = await prisma.credential.findUnique({
+      where: { id: req.params.id },
+      include: {
+        createdBy: {
+          select: { id: true, department: true },
+        },
+        members: {
+          where: { userId: req.userId },
+          select: { role: true, userId: true },
+        },
       },
     })
 
     if (!credential) {
+      return res.status(404).json({ error: 'Credential not found' })
+    }
+
+    // Get current user's department
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { department: true },
+    })
+
+    const department = currentUser?.department
+
+    // Check if user has access to view this credential
+    const isCreator = credential.createdById === req.userId
+    const isMember = credential.members.some(m => m.userId === req.userId)
+    const isSameDepartment = department && credential.createdBy.department === department
+    const isPublic = credential.privacyLevel === 'PUBLIC'
+
+    const hasAccess = isCreator || isMember || (isPublic && isSameDepartment)
+
+    if (!hasAccess) {
       return res.status(404).json({ error: 'Credential not found or insufficient permissions' })
+    }
+
+    // Check if user has edit permissions
+    // Allow: creator OR any member (viewer or editor) of shared credentials
+    // Do NOT allow same department members to edit public credentials (they can only view)
+    const canEdit = isCreator || isMember
+
+    if (!canEdit) {
+      return res.status(403).json({ error: 'You do not have permission to edit this credential. Only the creator or members can edit shared credentials.' })
     }
 
     const { company, geography, platform, url, username, password, authenticator, notes, privacyLevel } = req.body
 
+    // Validate required fields if they are being updated
+    if (company !== undefined && !company.trim()) {
+      return res.status(400).json({ error: 'Company is required' })
+    }
+    if (geography !== undefined && !geography.trim()) {
+      return res.status(400).json({ error: 'Geography is required' })
+    }
+    if (platform !== undefined && !platform.trim()) {
+      return res.status(400).json({ error: 'Platform is required' })
+    }
+    if (username !== undefined && !username.trim()) {
+      return res.status(400).json({ error: 'Username is required' })
+    }
+    if (password !== undefined && !password.trim()) {
+      return res.status(400).json({ error: 'Password is required' })
+    }
+
+    // Build update data object - only include fields that are provided
+    const updateData: any = {}
+
+    if (company !== undefined) {
+      updateData.company = company.trim()
+    }
+    if (geography !== undefined) {
+      updateData.geography = geography.trim()
+    }
+    if (platform !== undefined) {
+      updateData.platform = platform.trim()
+    }
+    if (url !== undefined) {
+      updateData.url = url?.trim() || null
+    }
+    if (username !== undefined) {
+      updateData.username = username.trim()
+    }
+    if (password !== undefined) {
+      updateData.password = password.trim()
+    }
+    if (authenticator !== undefined) {
+      updateData.authenticator = authenticator?.trim() || null
+    }
+    if (notes !== undefined) {
+      updateData.notes = notes?.trim() || null
+    }
+    if (privacyLevel !== undefined) {
+      updateData.privacyLevel = privacyLevel
+    }
+
     const updated = await prisma.credential.update({
       where: { id: req.params.id },
-      data: {
-        company: company?.trim() || credential.company,
-        geography: geography?.trim() || credential.geography,
-        platform: platform?.trim() || credential.platform,
-        url: url?.trim() !== undefined ? (url?.trim() || null) : credential.url,
-        username: username?.trim() || credential.username,
-        password: password?.trim() || credential.password,
-        authenticator: authenticator?.trim() !== undefined ? (authenticator?.trim() || null) : credential.authenticator,
-        notes: notes?.trim() !== undefined ? (notes?.trim() || null) : credential.notes,
-        privacyLevel: privacyLevel || credential.privacyLevel,
-      },
+      data: updateData,
       include: {
         createdBy: {
           select: { id: true, name: true, email: true },

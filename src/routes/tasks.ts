@@ -72,64 +72,99 @@ router.get('/my', authMiddleware, async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const tasks = await prisma.task.findMany({
-      where: {
-        assignees: {
-          some: {
-            userId: req.userId,
-          },
-        },
-      },
-      include: {
-        assignees: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-        },
-        createdBy: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
-        project: true,
-        reviewRequestedBy: {
-          select: { id: true, name: true, email: true },
-        },
-        reviewer: {
-          select: { id: true, name: true, email: true },
-        },
-        reviewedBy: {
-          select: { id: true, name: true, email: true },
-        },
-        comments: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-          orderBy: {
-            createdAt: 'desc',
-          },
-        },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    })
+    const limit = parseInt(req.query.limit as string) || 20
+    const skip = parseInt(req.query.skip as string) || 0
 
-    res.json(tasks)
+    const where = {
+      assignees: {
+        some: {
+          userId: req.userId,
+        },
+      },
+    }
+
+    // Optimized: Removed comments, use select for better performance
+    const [tasks, total] = await Promise.all([
+      prisma.task.findMany({
+        where,
+        select: {
+          id: true,
+          title: true,
+          description: true,
+          status: true,
+          priority: true,
+          startDate: true,
+          dueDate: true,
+          projectId: true,
+          brand: true,
+          tags: true,
+          recurring: true,
+          imageCount: true,
+          videoCount: true,
+          link: true,
+          reviewStatus: true,
+          reviewRequestedById: true,
+          reviewRequestedAt: true,
+          reviewerId: true,
+          reviewedById: true,
+          reviewedAt: true,
+          statusUpdatedAt: true,
+          createdAt: true,
+          updatedAt: true,
+          createdById: true,
+          assignees: {
+            select: {
+              id: true,
+              userId: true,
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                },
+              },
+            },
+          },
+          createdBy: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+          project: {
+            select: {
+              id: true,
+              name: true,
+              brand: true,
+              department: true,
+            },
+          },
+          reviewRequestedBy: {
+            select: { id: true, name: true, email: true },
+          },
+          reviewer: {
+            select: { id: true, name: true, email: true },
+          },
+          reviewedBy: {
+            select: { id: true, name: true, email: true },
+          },
+        },
+        orderBy: [
+          { statusUpdatedAt: 'desc' },
+          { createdAt: 'desc' },
+        ],
+        take: limit,
+        skip: skip,
+      }),
+      prisma.task.count({ where }),
+    ])
+
+    res.json({
+      tasks,
+      total,
+      hasMore: skip + tasks.length < total,
+    })
   } catch (error) {
     console.error('Error fetching my tasks:', error)
     res.status(500).json({ error: 'Internal server error' })
@@ -182,68 +217,102 @@ router.get('/department', authMiddleware, async (req: AuthRequest, res: Response
 
     const departmentUserIds = departmentUsers.map(u => u.id)
 
-    // Get tasks assigned to department users
-    const tasks = await prisma.task.findMany({
-      where: {
-        assignees: {
-          some: {
-            userId: {
-              in: departmentUserIds,
-            },
-          },
-        },
-      },
-      include: {
-        assignees: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-                department: true,
-              },
-            },
-          },
-        },
-        createdBy: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
-        project: true,
-        reviewRequestedBy: {
-          select: { id: true, name: true, email: true },
-        },
-        reviewer: {
-          select: { id: true, name: true, email: true },
-        },
-        reviewedBy: {
-          select: { id: true, name: true, email: true },
-        },
-        comments: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-          orderBy: {
-            createdAt: 'desc',
-          },
-        },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    })
+    const limit = parseInt(req.query.limit as string) || 20
+    const skip = parseInt(req.query.skip as string) || 0
 
-    res.json(tasks)
+    const where = {
+      assignees: {
+        some: {
+          userId: {
+            in: departmentUserIds,
+          },
+        },
+      },
+    }
+
+    // Optimized: Removed comments, use select
+    const [tasks, total] = await Promise.all([
+      prisma.task.findMany({
+        where,
+        select: {
+          id: true,
+          title: true,
+          description: true,
+          status: true,
+          priority: true,
+          startDate: true,
+          dueDate: true,
+          projectId: true,
+          brand: true,
+          tags: true,
+          recurring: true,
+          imageCount: true,
+          videoCount: true,
+          link: true,
+          reviewStatus: true,
+          reviewRequestedById: true,
+          reviewRequestedAt: true,
+          reviewerId: true,
+          reviewedById: true,
+          reviewedAt: true,
+          statusUpdatedAt: true,
+          createdAt: true,
+          updatedAt: true,
+          createdById: true,
+          assignees: {
+            select: {
+              id: true,
+              userId: true,
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                  department: true,
+                },
+              },
+            },
+          },
+          createdBy: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+          project: {
+            select: {
+              id: true,
+              name: true,
+              brand: true,
+              department: true,
+            },
+          },
+          reviewRequestedBy: {
+            select: { id: true, name: true, email: true },
+          },
+          reviewer: {
+            select: { id: true, name: true, email: true },
+          },
+          reviewedBy: {
+            select: { id: true, name: true, email: true },
+          },
+        },
+        orderBy: [
+          { statusUpdatedAt: 'desc' },
+          { createdAt: 'desc' },
+        ],
+        take: limit,
+        skip: skip,
+      }),
+      prisma.task.count({ where }),
+    ])
+
+    res.json({
+      tasks,
+      total,
+      hasMore: skip + tasks.length < total,
+    })
   } catch (error) {
     console.error('Error fetching department tasks:', error)
     res.status(500).json({ error: 'Internal server error' })
@@ -256,6 +325,9 @@ router.get('/all-departments', authMiddleware, async (req: AuthRequest, res: Res
     if (!req.userId) {
       return res.status(401).json({ error: 'Unauthorized' })
     }
+
+    const limit = parseInt(req.query.limit as string) || 20
+    const skip = parseInt(req.query.skip as string) || 0
 
     // Get current user's role
     const currentUser = await prisma.user.findUnique({
@@ -278,58 +350,68 @@ router.get('/all-departments', authMiddleware, async (req: AuthRequest, res: Res
     }
 
     // Get all tasks from all departments
-    const tasks = await prisma.task.findMany({
-      include: {
-        assignees: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-                department: true,
+    const [tasks, total] = await Promise.all([
+      prisma.task.findMany({
+        include: {
+          assignees: {
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                  department: true,
+                },
               },
             },
           },
-        },
-        createdBy: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
-        project: true,
-        reviewRequestedBy: {
-          select: { id: true, name: true, email: true },
-        },
-        reviewer: {
-          select: { id: true, name: true, email: true },
-        },
-        reviewedBy: {
-          select: { id: true, name: true, email: true },
-        },
-        comments: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
+          createdBy: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
             },
           },
-          orderBy: {
-            createdAt: 'desc',
+          project: true,
+          reviewRequestedBy: {
+            select: { id: true, name: true, email: true },
+          },
+          reviewer: {
+            select: { id: true, name: true, email: true },
+          },
+          reviewedBy: {
+            select: { id: true, name: true, email: true },
+          },
+          comments: {
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                },
+              },
+            },
+            orderBy: {
+              createdAt: 'desc',
+            },
           },
         },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    })
+        orderBy: [
+          { statusUpdatedAt: 'desc' },
+          { createdAt: 'desc' },
+        ],
+        take: limit,
+        skip: skip,
+      }),
+      prisma.task.count(),
+    ])
 
-    res.json(tasks)
+    res.json({
+      tasks,
+      total,
+      hasMore: skip + tasks.length < total,
+    })
   } catch (error) {
     console.error('Error fetching all departments tasks:', error)
     res.status(500).json({ error: 'Internal server error' })
@@ -343,6 +425,9 @@ router.get('/team', authMiddleware, async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
+    const limit = parseInt(req.query.limit as string) || 20
+    const skip = parseInt(req.query.skip as string) || 0
+
     // Get logged-in user's department
     const currentUser = await prisma.user.findUnique({
       where: { id: req.userId },
@@ -355,7 +440,7 @@ router.get('/team', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     // If user has no department, return empty array
     if (!currentUser.department) {
-      return res.json([])
+      return res.json({ tasks: [], total: 0, hasMore: false })
     }
 
     // Get all users in the same department
@@ -369,67 +454,98 @@ router.get('/team', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     const departmentUserIds = departmentUsers.map(u => u.id)
 
-    // Get tasks assigned to users in the same department
-    const tasks = await prisma.task.findMany({
-      where: {
-        assignees: {
-          some: {
-            userId: {
-              in: departmentUserIds,
-            },
+    const where = {
+      assignees: {
+        some: {
+          userId: {
+            in: departmentUserIds,
           },
         },
       },
-      include: {
-        assignees: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-        },
-        createdBy: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
-        project: true,
-        reviewRequestedBy: {
-          select: { id: true, name: true, email: true },
-        },
-        reviewer: {
-          select: { id: true, name: true, email: true },
-        },
-        reviewedBy: {
-          select: { id: true, name: true, email: true },
-        },
-        comments: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-          orderBy: {
-            createdAt: 'desc',
-          },
-        },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    })
+    }
 
-    res.json(tasks)
+    // Get tasks assigned to users in the same department - Optimized: removed comments
+    const [tasks, total] = await Promise.all([
+      prisma.task.findMany({
+        where,
+        select: {
+          id: true,
+          title: true,
+          description: true,
+          status: true,
+          priority: true,
+          startDate: true,
+          dueDate: true,
+          projectId: true,
+          brand: true,
+          tags: true,
+          recurring: true,
+          imageCount: true,
+          videoCount: true,
+          link: true,
+          reviewStatus: true,
+          reviewRequestedById: true,
+          reviewRequestedAt: true,
+          reviewerId: true,
+          reviewedById: true,
+          reviewedAt: true,
+          statusUpdatedAt: true,
+          createdAt: true,
+          updatedAt: true,
+          createdById: true,
+          assignees: {
+            select: {
+              id: true,
+              userId: true,
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                },
+              },
+            },
+          },
+          createdBy: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+          project: {
+            select: {
+              id: true,
+              name: true,
+              brand: true,
+              department: true,
+            },
+          },
+          reviewRequestedBy: {
+            select: { id: true, name: true, email: true },
+          },
+          reviewer: {
+            select: { id: true, name: true, email: true },
+          },
+          reviewedBy: {
+            select: { id: true, name: true, email: true },
+          },
+        },
+        orderBy: [
+          { statusUpdatedAt: 'desc' },
+          { createdAt: 'desc' },
+        ],
+        take: limit,
+        skip: skip,
+      }),
+      prisma.task.count({ where }),
+    ])
+
+    res.json({
+      tasks,
+      total,
+      hasMore: skip + tasks.length < total,
+    })
   } catch (error) {
     console.error('Error fetching team tasks:', error)
     res.status(500).json({ error: 'Internal server error' })
@@ -443,66 +559,98 @@ router.get('/review', authMiddleware, async (req: AuthRequest, res: Response) =>
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
+    const limit = parseInt(req.query.limit as string) || 20
+    const skip = parseInt(req.query.skip as string) || 0
+
     console.log('Fetching review tasks for user:', req.userId)
 
-    const tasks = await prisma.task.findMany({
-      where: {
-        reviewerId: req.userId,
-        reviewStatus: {
-          in: ['REVIEW_REQUESTED', 'UNDER_REVIEW'],
-        },
+    const where = {
+      reviewerId: req.userId,
+      reviewStatus: {
+        in: ['REVIEW_REQUESTED', 'UNDER_REVIEW'],
       },
-      include: {
-        assignees: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
+    }
+
+    // Optimized: Removed comments, use select for better performance
+    const [tasks, total] = await Promise.all([
+      prisma.task.findMany({
+        where,
+        select: {
+          id: true,
+          title: true,
+          description: true,
+          status: true,
+          priority: true,
+          startDate: true,
+          dueDate: true,
+          projectId: true,
+          brand: true,
+          tags: true,
+          recurring: true,
+          imageCount: true,
+          videoCount: true,
+          link: true,
+          reviewStatus: true,
+          reviewRequestedById: true,
+          reviewRequestedAt: true,
+          reviewerId: true,
+          reviewedById: true,
+          reviewedAt: true,
+          statusUpdatedAt: true,
+          createdAt: true,
+          updatedAt: true,
+          createdById: true,
+          assignees: {
+            select: {
+              id: true,
+              userId: true,
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                },
               },
             },
           },
-        },
-        createdBy: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
-        project: true,
-        reviewRequestedBy: {
-          select: { id: true, name: true, email: true },
-        },
-        reviewer: {
-          select: { id: true, name: true, email: true },
-        },
-        reviewedBy: {
-          select: { id: true, name: true, email: true },
-        },
-        comments: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
+          createdBy: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
             },
           },
-          orderBy: {
-            createdAt: 'desc',
+          project: {
+            select: {
+              id: true,
+              name: true,
+              brand: true,
+              department: true,
+            },
+          },
+          reviewRequestedBy: {
+            select: { id: true, name: true, email: true },
+          },
+          reviewer: {
+            select: { id: true, name: true, email: true },
+          },
+          reviewedBy: {
+            select: { id: true, name: true, email: true },
           },
         },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    })
+        orderBy: [
+          { statusUpdatedAt: 'desc' },
+          { createdAt: 'desc' },
+        ],
+        take: limit,
+        skip: skip,
+      }),
+      prisma.task.count({ where }),
+    ])
 
     console.log('Review tasks found:', {
       count: tasks.length,
+      total,
       userId: req.userId,
       tasks: tasks.map(t => ({
         id: t.id,
@@ -512,7 +660,11 @@ router.get('/review', authMiddleware, async (req: AuthRequest, res: Response) =>
       })),
     })
 
-    res.json(tasks)
+    res.json({
+      tasks,
+      total,
+      hasMore: skip + tasks.length < total,
+    })
   } catch (error) {
     console.error('Error fetching review tasks:', error)
     res.status(500).json({ error: 'Internal server error' })
@@ -994,6 +1146,9 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
     const parsedImageCount = parseCount(imageCount)
     const parsedVideoCount = parseCount(videoCount)
 
+    // Check if status is being changed
+    const isStatusChanged = status && status !== oldTask.status
+    
     const task = await prisma.task.update({
       where: { id: req.params.id },
       data: {
@@ -1010,6 +1165,8 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
         ...(parsedImageCount !== undefined && { imageCount: parsedImageCount }),
         ...(parsedVideoCount !== undefined && { videoCount: parsedVideoCount }),
         ...(link !== undefined && { link: link && link.trim() !== '' ? link.trim() : null }),
+        // Update statusUpdatedAt when status changes
+        ...(isStatusChanged && { statusUpdatedAt: new Date() }),
         // Clear review status when status is manually changed (unless it's ON_HOLD due to review)
         ...(status && status !== 'ON_HOLD' && { 
           reviewStatus: null,

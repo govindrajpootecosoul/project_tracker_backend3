@@ -439,6 +439,8 @@ router.get('/members', authMiddleware, async (req: AuthRequest, res: Response) =
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
+    const limit = parseInt(req.query.limit as string) || 20
+    const skip = parseInt(req.query.skip as string) || 0
     const { department, search } = req.query
 
     // Get current user's role and department
@@ -457,7 +459,9 @@ router.get('/members', authMiddleware, async (req: AuthRequest, res: Response) =
     const isSuperAdmin = currentUser.role?.toLowerCase() === 'superadmin'
     
     // Build where condition for users
-    const where: any = {}
+    const where: any = {
+      isActive: true, // Only show active users
+    }
     
     // Apply department filter first (before search)
     if (!isSuperAdmin && currentUser.department) {
@@ -476,12 +480,20 @@ router.get('/members', authMiddleware, async (req: AuthRequest, res: Response) =
       // If no department filter, show all (no where condition)
     }
 
-    // Get all users matching the department criteria
-    let users = await prisma.user.findMany({
-      where: {
-        ...where,
-        isActive: true, // Only show active users
-      },
+    // Apply search filter in database query if possible
+    if (search && typeof search === 'string') {
+      where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { email: { contains: search, mode: 'insensitive' } },
+      ]
+    }
+
+    // Get total count
+    const total = await prisma.user.count({ where })
+
+    // Get paginated users
+    const users = await prisma.user.findMany({
+      where,
       select: {
         id: true,
         name: true,
@@ -494,106 +506,163 @@ router.get('/members', authMiddleware, async (req: AuthRequest, res: Response) =
       orderBy: {
         name: 'asc',
       },
+      take: limit,
+      skip: skip,
     })
-
-    // Apply search filter (case-insensitive) - search within the already filtered users
-    if (search && typeof search === 'string') {
-      const searchLower = search.toLowerCase()
-      users = users.filter(user => 
-        user.name?.toLowerCase().includes(searchLower) ||
-        user.email.toLowerCase().includes(searchLower)
-      )
-    }
     
     const userIds = users.map(u => u.id)
     
-    const teamMembers = await Promise.all(
-      userIds.map(async (userId) => {
-        const tasks = await prisma.task.findMany({
-          where: {
-            assignees: {
-              some: {
-                userId,
-              },
+    // Optimized: Batch all queries instead of N+1 queries
+    const [allTasks, allProjects, allCredentialMembers, allSubscriptionMembers, allUserData] = await Promise.all([
+      // Get all tasks for all users at once
+      prisma.task.findMany({
+        where: {
+          assignees: {
+            some: {
+              userId: { in: userIds },
             },
           },
-        })
-
-        const projects = await prisma.projectMember.findMany({
-          where: { userId },
-          select: { projectId: true },
-        })
-
-        // Get credential memberships
-        const credentialMembers = await prisma.credentialMember.findMany({
-          where: { userId },
-          include: {
-            credential: {
-              select: { id: true, company: true },
+        },
+        select: {
+          id: true,
+          status: true,
+          assignees: {
+            select: {
+              userId: true,
             },
           },
-        })
-
-        // Get subscription memberships
-        const subscriptionMembers = await prisma.subscriptionMember.findMany({
-          where: { userId },
-          include: {
-            subscription: {
-              select: { id: true, name: true },
-            },
+        },
+      }),
+      // Get all projects for all users at once
+      prisma.projectMember.findMany({
+        where: { userId: { in: userIds } },
+        select: { userId: true, projectId: true },
+      }),
+      // Get all credential memberships at once
+      prisma.credentialMember.findMany({
+        where: { userId: { in: userIds } },
+        include: {
+          credential: {
+            select: { id: true, company: true },
           },
-        })
-
-        const user = users.find(u => u.id === userId)
-
-        // Get user permissions
-        const userData = await prisma.user.findUnique({
-          where: { id: userId },
-          select: {
-            hasCredentialAccess: true,
-            hasSubscriptionAccess: true,
+        },
+      }),
+      // Get all subscription memberships at once
+      prisma.subscriptionMember.findMany({
+        where: { userId: { in: userIds } },
+        include: {
+          subscription: {
+            select: { id: true, name: true },
           },
-        })
+        },
+      }),
+      // Get all user permissions at once
+      prisma.user.findMany({
+        where: { id: { in: userIds } },
+        select: {
+          id: true,
+          hasCredentialAccess: true,
+          hasSubscriptionAccess: true,
+        },
+      }),
+    ])
 
-        return {
-          id: userId,
-          name: user?.name,
-          email: user?.email,
-          department: user?.department,
-          company: user?.company,
-          employeeId: user?.employeeId,
-          role: mapRoleToEnum(user?.role),
-          tasksAssigned: tasks.length,
-          projectsInvolved: projects.length,
-          hasCredentialAccess: userData?.hasCredentialAccess || false,
-          hasSubscriptionAccess: userData?.hasSubscriptionAccess || false,
-          statusSummary: {
-            inProgress: tasks.filter(t => t.status === 'IN_PROGRESS').length,
-            completed: tasks.filter(t => t.status === 'COMPLETED').length,
-            yts: tasks.filter(t => t.status === 'YTS').length,
-            onHold: tasks.filter(t => {
-              const status = String(t.status).toUpperCase().trim()
-              return status === 'ON_HOLD' || status === 'ONHOLD' || status === 'ON HOLD'
-            }).length,
-            recurring: tasks.filter(t => t.status === 'RECURRING').length,
-          },
-          credentialMembers: credentialMembers.map(cm => ({
-            id: cm.id,
-            credentialId: cm.credentialId,
-            credentialName: cm.credential.company,
-            isActive: cm.isActive,
-          })),
-          subscriptionMembers: subscriptionMembers.map(sm => ({
-            id: sm.id,
-            subscriptionId: sm.subscriptionId,
-            subscriptionName: sm.subscription.name,
-            isActive: sm.isActive,
-          })),
+    // Create lookup maps for O(1) access
+    const tasksByUser = new Map<string, any[]>()
+    const projectsByUser = new Map<string, number>()
+    const credentialMembersByUser = new Map<string, any[]>()
+    const subscriptionMembersByUser = new Map<string, any[]>()
+    const userDataMap = new Map<string, any>()
+
+    // Group tasks by user
+    allTasks.forEach(task => {
+      task.assignees.forEach((assignee: any) => {
+        if (!tasksByUser.has(assignee.userId)) {
+          tasksByUser.set(assignee.userId, [])
         }
+        tasksByUser.get(assignee.userId)!.push(task)
       })
-    )
+    })
 
-    res.json(teamMembers)
+    // Group projects by user
+    allProjects.forEach(pm => {
+      projectsByUser.set(pm.userId, (projectsByUser.get(pm.userId) || 0) + 1)
+    })
+
+    // Group credential members by user
+    allCredentialMembers.forEach(cm => {
+      const userId = (cm as any).userId
+      if (!credentialMembersByUser.has(userId)) {
+        credentialMembersByUser.set(userId, [])
+      }
+      credentialMembersByUser.get(userId)!.push(cm)
+    })
+
+    // Group subscription members by user
+    allSubscriptionMembers.forEach(sm => {
+      const userId = (sm as any).userId
+      if (!subscriptionMembersByUser.has(userId)) {
+        subscriptionMembersByUser.set(userId, [])
+      }
+      subscriptionMembersByUser.get(userId)!.push(sm)
+    })
+
+    // Map user data
+    allUserData.forEach(ud => {
+      userDataMap.set(ud.id, ud)
+    })
+
+    // Build response
+    const teamMembers = users.map(user => {
+      const userId = user.id
+      const tasks = tasksByUser.get(userId) || []
+      const projectsCount = projectsByUser.get(userId) || 0
+      const credentialMembers = credentialMembersByUser.get(userId) || []
+      const subscriptionMembers = subscriptionMembersByUser.get(userId) || []
+      const userData = userDataMap.get(userId)
+
+      return {
+        id: userId,
+        name: user.name,
+        email: user.email,
+        department: user.department,
+        company: user.company,
+        employeeId: user.employeeId,
+        role: mapRoleToEnum(user.role),
+        tasksAssigned: tasks.length,
+        projectsInvolved: projectsCount,
+        hasCredentialAccess: userData?.hasCredentialAccess || false,
+        hasSubscriptionAccess: userData?.hasSubscriptionAccess || false,
+        statusSummary: {
+          inProgress: tasks.filter(t => t.status === 'IN_PROGRESS').length,
+          completed: tasks.filter(t => t.status === 'COMPLETED').length,
+          yts: tasks.filter(t => t.status === 'YTS').length,
+          onHold: tasks.filter(t => {
+            const status = String(t.status).toUpperCase().trim()
+            return status === 'ON_HOLD' || status === 'ONHOLD' || status === 'ON HOLD'
+          }).length,
+          recurring: tasks.filter(t => t.status === 'RECURRING').length,
+        },
+        credentialMembers: credentialMembers.map((cm: any) => ({
+          id: cm.id,
+          credentialId: cm.credentialId,
+          credentialName: cm.credential.company,
+          isActive: cm.isActive,
+        })),
+        subscriptionMembers: subscriptionMembers.map((sm: any) => ({
+          id: sm.id,
+          subscriptionId: sm.subscriptionId,
+          subscriptionName: sm.subscription.name,
+          isActive: sm.isActive,
+        })),
+      }
+    })
+
+    res.json({
+      members: teamMembers,
+      total,
+      hasMore: skip + teamMembers.length < total,
+    })
   } catch (error) {
     console.error('Error fetching team members:', error)
     res.status(500).json({ error: 'Internal server error' })
