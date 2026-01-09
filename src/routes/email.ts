@@ -35,12 +35,14 @@ export async function sendDepartmentWiseEmail(
     const departmentUserIds = departmentUsers.map((u) => u.id)
 
     // Get start and end of current date for filtering completed tasks
+    // Use UTC to avoid timezone issues
     const today = new Date()
-    today.setHours(0, 0, 0, 0)
+    today.setUTCHours(0, 0, 0, 0)
     const tomorrow = new Date(today)
-    tomorrow.setDate(tomorrow.getDate() + 1)
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1)
 
     // Fetch IN_PROGRESS, RECURRING, and COMPLETED (from today) tasks from department members
+    // Include completed tasks where statusUpdatedAt OR updatedAt is today (to catch all completed tasks)
     const tasks = await prisma.task.findMany({
       where: {
         OR: [
@@ -50,11 +52,27 @@ export async function sendDepartmentWiseEmail(
             },
           },
           {
-            status: 'COMPLETED',
-            statusUpdatedAt: {
-              gte: today,
-              lt: tomorrow,
-            },
+            AND: [
+              {
+                status: 'COMPLETED',
+              },
+              {
+                OR: [
+                  {
+                    statusUpdatedAt: {
+                      gte: today,
+                      lt: tomorrow,
+                    },
+                  },
+                  {
+                    updatedAt: {
+                      gte: today,
+                      lt: tomorrow,
+                    },
+                  },
+                ],
+              },
+            ],
           },
         ],
         assignees: {
@@ -112,6 +130,22 @@ export async function sendDepartmentWiseEmail(
       } catch {
         return 'N/A'
       }
+    }
+
+    // Format status: First letter capital, rest lowercase, replace underscores with spaces
+    const formatStatus = (status: string | null | undefined): string => {
+      if (!status) return 'N/A'
+      return status
+        .toLowerCase()
+        .split('_')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ')
+    }
+
+    // Format priority: First letter capital, rest lowercase
+    const formatPriority = (priority: string | null | undefined): string => {
+      if (!priority) return 'N/A'
+      return priority.charAt(0).toUpperCase() + priority.slice(1).toLowerCase()
     }
 
     // Group tasks by employee
@@ -179,7 +213,8 @@ export async function sendDepartmentWiseEmail(
                 const taskLink = task.link
                   ? `<a href="${escapeHtml(task.link)}" target="_blank" style="color: #006ba6; text-decoration: underline;">${escapeHtml(task.link)}</a>`
                   : '-'
-                const taskStatus = escapeHtml(task.status || 'N/A')
+                const taskStatus = formatStatus(task.status)
+                const formattedPriority = formatPriority(task.priority)
                 const isCompleted = task.status === 'COMPLETED'
                 // Green background for entire row if task is completed
                 const rowBackgroundColor = isCompleted ? '#d4edda' : rowColor
@@ -192,7 +227,7 @@ export async function sendDepartmentWiseEmail(
                     <td style="padding: 8px; border: 1px solid #ddd; width: 15%; word-wrap: break-word;">${projectName}</td>
                     <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${taskTitle}</td>
                     <td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word; ${statusStyle}">${taskStatus}</td>
-                    <td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${priority}</td>
+                    <td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${formattedPriority}</td>
                     <td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${dueDate}</td>
                     ${includeMediaColumns ? `<td style="padding: 8px; border: 1px solid #ddd; width: 8%; word-wrap: break-word;">${imageCount}</td>` : ''}
                     ${includeMediaColumns ? `<td style="padding: 8px; border: 1px solid #ddd; width: 8%; word-wrap: break-word;">${videoCount}</td>` : ''}
@@ -398,12 +433,14 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
         const departmentUserIds = departmentUsers.map((u: any) => u.id)
 
         // Get start and end of current date for filtering completed tasks
+        // Use UTC to avoid timezone issues
         const today = new Date()
-        today.setHours(0, 0, 0, 0)
+        today.setUTCHours(0, 0, 0, 0)
         const tomorrow = new Date(today)
-        tomorrow.setDate(tomorrow.getDate() + 1)
+        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1)
 
         // Fetch IN_PROGRESS, RECURRING, and COMPLETED (from today) tasks from department members
+        // Include completed tasks where statusUpdatedAt OR updatedAt is today (to catch all completed tasks)
         tasks = await prisma.task.findMany({
           where: {
             OR: [
@@ -413,11 +450,27 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
                 },
               },
               {
-                status: 'COMPLETED',
-                statusUpdatedAt: {
-                  gte: today,
-                  lt: tomorrow,
-                },
+                AND: [
+                  {
+                    status: 'COMPLETED',
+                  },
+                  {
+                    OR: [
+                      {
+                        statusUpdatedAt: {
+                          gte: today,
+                          lt: tomorrow,
+                        },
+                      },
+                      {
+                        updatedAt: {
+                          gte: today,
+                          lt: tomorrow,
+                        },
+                      },
+                    ],
+                  },
+                ],
               },
             ],
             assignees: {
@@ -457,12 +510,14 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
       }
     } else {
       // Get start and end of current date for filtering completed tasks
+      // Use UTC to avoid timezone issues
       const today = new Date()
-      today.setHours(0, 0, 0, 0)
+      today.setUTCHours(0, 0, 0, 0)
       const tomorrow = new Date(today)
-      tomorrow.setDate(tomorrow.getDate() + 1)
+      tomorrow.setUTCDate(tomorrow.getUTCDate() + 1)
 
       // Fetch user's own IN_PROGRESS, RECURRING, and today's COMPLETED tasks
+      // Include completed tasks where statusUpdatedAt OR updatedAt is today (to catch all completed tasks)
       tasks = await prisma.task.findMany({
         where: {
           OR: [
@@ -472,11 +527,27 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
               },
             },
             {
-              status: 'COMPLETED',
-              statusUpdatedAt: {
-                gte: today,
-                lt: tomorrow,
-              },
+              AND: [
+                {
+                  status: 'COMPLETED',
+                },
+                {
+                  OR: [
+                    {
+                      statusUpdatedAt: {
+                        gte: today,
+                        lt: tomorrow,
+                      },
+                    },
+                    {
+                      updatedAt: {
+                        gte: today,
+                        lt: tomorrow,
+                      },
+                    },
+                  ],
+                },
+              ],
             },
           ],
           assignees: {
@@ -532,6 +603,22 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
       } catch {
         return 'N/A'
       }
+    }
+
+    // Format status: First letter capital, rest lowercase, replace underscores with spaces
+    const formatStatus = (status: string | null | undefined): string => {
+      if (!status) return 'N/A'
+      return status
+        .toLowerCase()
+        .split('_')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ')
+    }
+
+    // Format priority: First letter capital, rest lowercase
+    const formatPriority = (priority: string | null | undefined): string => {
+      if (!priority) return 'N/A'
+      return priority.charAt(0).toUpperCase() + priority.slice(1).toLowerCase()
     }
 
     // Generate HTML for tasks report (same format for both department and non-department)
@@ -660,9 +747,9 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
           const brand = escapeHtml(task.brand || 'N/A')
           const projectName = escapeHtml(task.project?.name || 'N/A')
           const taskTitle = escapeHtml(task.title)
-          const priority = escapeHtml(task.priority || 'N/A')
+          const formattedPriority = formatPriority(task.priority)
           const dueDate = formatDate(task.dueDate)
-          const taskStatus = escapeHtml(task.status || 'N/A')
+          const taskStatus = formatStatus(task.status)
           const showMediaCounts =
             includeMediaColumns &&
             (isNewProductDesignDepartment(task.project?.department) || isNewProductDesignDepartment(currentUser?.department))
@@ -678,7 +765,7 @@ router.post('/send', authMiddleware, async (req: AuthRequest, res: Response) => 
               <td style="padding: 8px; border: 1px solid #ddd; width: 15%; word-wrap: break-word;">${projectName}</td>
               <td style="padding: 8px; border: 1px solid #ddd; width: 20%; word-wrap: break-word;">${taskTitle}</td>
               <td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word; ${statusStyle}">${taskStatus}</td>
-              <td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${priority}</td>
+              <td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${formattedPriority}</td>
               <td style="padding: 8px; border: 1px solid #ddd; width: 10%; word-wrap: break-word;">${dueDate}</td>
               ${includeMediaColumns ? `<td style="padding: 8px; border: 1px solid #ddd; width: 8%; word-wrap: break-word;">${imageCount}</td>` : ''}
               ${includeMediaColumns ? `<td style="padding: 8px; border: 1px solid #ddd; width: 8%; word-wrap: break-word;">${videoCount}</td>` : ''}
