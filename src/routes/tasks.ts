@@ -939,29 +939,34 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    const { title, description, status, priority, startDate, dueDate, projectId, brand, tags, recurring, assignees, imageCount, videoCount, link } = req.body
+    const { title, description, status, priority, startDate, dueDate, projectId, brand, tags, recurring, assignees, imageCount, videoCount, link, tasks } = req.body
 
-    if (!title || typeof title !== 'string' || !title.trim()) {
-      return res.status(400).json({ error: 'Title is required' })
+    // Support both new format (tasks array) and old format (single title)
+    let taskInputs: Array<{ title: string; description?: string | null; imageCount?: number; videoCount?: number }> = []
+
+    if (tasks && Array.isArray(tasks) && tasks.length > 0) {
+      // New format: tasks array
+      taskInputs = tasks
+        .map((t: any) => ({
+          title: typeof t.title === 'string' ? t.title.trim() : '',
+          description: typeof t.description === 'string' ? t.description.trim() : null,
+          imageCount: typeof t.imageCount !== 'undefined' ? t.imageCount : undefined,
+          videoCount: typeof t.videoCount !== 'undefined' ? t.videoCount : undefined,
+        }))
+        .filter((t: { title: string }) => t.title.length > 0)
+    } else if (title && typeof title === 'string' && title.trim()) {
+      // Old format: single title (backward compatibility) - treat as ONE task, no comma splitting
+      taskInputs = [{
+        title: title.trim(),
+        description: description && typeof description === 'string' && description.trim() 
+          ? description.trim() 
+          : null,
+      }]
     }
 
-    // Split titles by comma and trim
-    const titles = title
-      .split(',')
-      .map(t => t.trim())
-      .filter(t => t.length > 0)
-
-    if (titles.length === 0) {
-      return res.status(400).json({ error: 'At least one valid title is required' })
+    if (taskInputs.length === 0) {
+      return res.status(400).json({ error: 'At least one valid task title is required' })
     }
-
-    // Split descriptions by comma and trim (optional)
-    // Don't filter out empty strings to maintain index mapping with titles
-    const descriptions = description && typeof description === 'string' && description.trim()
-      ? description
-          .split(',')
-          .map(d => d.trim())
-      : []
 
     // Clean up empty strings to null and validate ObjectIDs
     // MongoDB ObjectID must be 24 hex characters (12 bytes)
@@ -1001,16 +1006,14 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       : [{ userId: req.userId }]
 
     // Create multiple tasks
-    const tasksToCreate = titles.map((taskTitle, index) => {
-      // Map description: first description to first task, second to second, etc.
-      // If no description for this task, use empty string
-      const taskDescription = index < descriptions.length 
-        ? descriptions[index] 
-        : null
-
+    const tasksToCreate = taskInputs.map((taskInput) => {
+      // Use per-task imageCount/videoCount if available, otherwise fall back to top-level values
+      const taskImageCount = taskInput.imageCount !== undefined ? parseCount(taskInput.imageCount) : parseCount(imageCount)
+      const taskVideoCount = taskInput.videoCount !== undefined ? parseCount(taskInput.videoCount) : parseCount(videoCount)
+      
       return {
-        title: taskTitle,
-        description: taskDescription && taskDescription.trim() !== '' ? taskDescription.trim() : null,
+        title: taskInput.title,
+        description: taskInput.description && taskInput.description.trim() !== '' ? taskInput.description.trim() : null,
         status: status || 'IN_PROGRESS',
         priority: priority || 'MEDIUM',
         startDate: startDateValue,
@@ -1019,8 +1022,8 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
         brand: cleanBrand,
         tags: cleanTags,
         recurring: cleanRecurring as any,
-        imageCount: parseCount(imageCount),
-        videoCount: parseCount(videoCount),
+        imageCount: taskImageCount,
+        videoCount: taskVideoCount,
         link: link && link.trim() !== '' ? link.trim() : null,
         createdById: req.userId!,
         assignees: {
