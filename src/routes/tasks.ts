@@ -1241,6 +1241,142 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
       },
     })
 
+    // Sync status to corresponding request if this task was created from a request
+    // Tasks created from requests have title format: [Request] {request.title}
+    // and have [RequestID:{id}] in the description
+    // Sync request status when task status changes
+    if (isStatusChanged && status) {
+      try {
+        // Use old task description to find RequestID (since we're syncing based on the old task state)
+        // The RequestID should be in the description when the task was created
+        // When only status is updated, description is not sent, so we use oldTask.description
+        const taskDescription = oldTask.description || ''
+        
+        // Try to extract request ID from description first (most reliable)
+        let requestId: string | null = null
+        if (taskDescription) {
+          const requestIdMatch = taskDescription.match(/\[RequestID:([a-fA-F0-9]{24})\]/)
+          if (requestIdMatch && requestIdMatch[1]) {
+            requestId = requestIdMatch[1]
+            console.log(`[Task Sync] Found RequestID in description: ${requestId}`)
+          } else {
+            console.log(`[Task Sync] No RequestID found in description. Task ID: ${task.id}, Title: ${oldTask.title}`)
+            console.log(`[Task Sync] Description preview: ${taskDescription.substring(0, 200)}`)
+          }
+        } else {
+          console.log(`[Task Sync] Task has no description. Task ID: ${task.id}, Title: ${oldTask.title}`)
+        }
+
+        // If no request ID in description, fall back to title matching (for tasks with [Request] prefix)
+        let relatedRequest = null
+        const taskTitle = task.title || oldTask.title
+        if (requestId) {
+          // Direct lookup by ID (most reliable)
+          relatedRequest = await prisma.request.findUnique({
+            where: { id: requestId },
+          })
+          console.log(`[Task Sync] Request lookup by ID ${requestId}:`, relatedRequest ? `Found (current status: ${relatedRequest.status})` : 'Not found')
+        } else if (taskTitle.startsWith('[Request] ')) {
+          // Fallback: Extract request title from task title and find by title + assignee
+          const requestTitle = taskTitle.replace(/^\[Request\] /, '').trim()
+          
+          const taskAssignees = await prisma.taskAssignee.findMany({
+            where: { taskId: task.id },
+            select: { userId: true },
+          })
+          const assigneeIds = taskAssignees.map(a => a.userId)
+
+          if (assigneeIds.length > 0) {
+            relatedRequest = await prisma.request.findFirst({
+              where: {
+                title: requestTitle,
+                assignedToId: { in: assigneeIds },
+              },
+            })
+            console.log(`[Task Sync] Request lookup by title "${requestTitle}":`, relatedRequest ? `Found (current status: ${relatedRequest.status})` : 'Not found')
+          }
+        }
+        
+        // Map task status to request status
+        let requestStatus: 'SUBMITTED' | 'APPROVED' | 'REJECTED' | 'IN_PROGRESS' | 'WAITING_INFO' | 'COMPLETED' | 'CLOSED' | null = null
+        if (status === 'YTS') {
+          requestStatus = 'APPROVED' // Yet To Start -> Approved
+        } else if (status === 'IN_PROGRESS') {
+          requestStatus = 'IN_PROGRESS'
+        } else if (status === 'ON_HOLD') {
+          requestStatus = 'WAITING_INFO'
+        } else if (status === 'COMPLETED') {
+          requestStatus = 'COMPLETED'
+        } else if (status === 'RECURRING') {
+          requestStatus = 'IN_PROGRESS'
+        }
+
+        if (relatedRequest && requestStatus) {
+          const updatedRequest = await prisma.request.update({
+            where: { id: relatedRequest.id },
+            data: { status: requestStatus },
+            include: {
+              createdBy: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                  department: true,
+                },
+              },
+              assignedTo: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                  department: true,
+                },
+              },
+              fromDepartment: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+              toDepartment: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+            },
+          })
+          console.log(`[Task Sync] Successfully synced task "${task.id}" status "${status}" to request "${relatedRequest.id}" (status: ${relatedRequest.status} -> ${requestStatus})`)
+          
+          // Log activity for request status change from task
+          try {
+            const { logActivity } = await import('./activities')
+            await logActivity({
+              userId: req.userId,
+              type: 'TASK_STATUS_CHANGED',
+              action: 'Request Status Updated from Task',
+              description: `Request "${relatedRequest.title}" status changed to ${requestStatus} via task update`,
+              entityType: 'request',
+              entityId: relatedRequest.id,
+            })
+          } catch (logError) {
+            // Don't fail if logging fails
+            console.error('Error logging request status change from task:', logError)
+          }
+        } else {
+          if (oldTask.title.startsWith('[Request] ') || (oldTask.description && oldTask.description.includes('[RequestID:'))) {
+            console.warn(`[Task Sync] Could not find related request for task: ${task.id}, title: "${oldTask.title}"`)
+            if (oldTask.description) {
+              console.warn(`[Task Sync] Task description: ${oldTask.description.substring(0, 200)}`)
+            }
+          }
+        }
+      } catch (requestSyncError: any) {
+        // Log error but don't fail the task update
+        console.error('Error syncing task status to request:', requestSyncError)
+      }
+    }
+
     // Update assignees if provided
     if (Array.isArray(assignees)) {
       await prisma.taskAssignee.deleteMany({

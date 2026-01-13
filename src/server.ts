@@ -13,6 +13,7 @@ import commentRoutes from './routes/comments';
 import aiRoutes from './routes/ai';
 import activityRoutes from './routes/activities';
 import thoughtRoutes, { ensureThoughtsSeed } from './routes/thoughts';
+import requestRoutes from './routes/requests';
 import { backfillTaskAssignees } from './scripts/backfill-task-assignees';
 import { startEmailScheduler } from './utils/emailScheduler';
 
@@ -75,6 +76,7 @@ app.use('/api', commentRoutes);
 app.use('/api', aiRoutes);
 app.use('/api/activities', activityRoutes);
 app.use('/api/thoughts', thoughtRoutes);
+app.use('/api/requests', requestRoutes);
 
 // Start server
 app.listen(PORT, async () => {

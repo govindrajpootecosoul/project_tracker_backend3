@@ -58,6 +58,8 @@ model User {
   projectCollaborationRequestsSent ProjectCollaborationRequest[] @relation("ProjectCollabRequester")
   projectCollaborationRequestsReceived ProjectCollaborationRequest[] @relation("ProjectCollabInvitee")
   thoughtsUpdated Thought[]
+  requestsCreated Request[] @relation("RequestCreator")
+  requestsAssigned Request[] @relation("RequestAssignee")
   
   @@map("users")
 }
@@ -68,6 +70,10 @@ model Department {
   createdById String?  @db.ObjectId
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  // Relations
+  requestsFrom Request[] @relation("RequestFromDepartment")
+  requestsTo   Request[] @relation("RequestToDepartment")
 
   @@map("departments")
 }
@@ -532,5 +538,58 @@ enum BillingCycle {
 enum CredentialPrivacyLevel {
   PRIVATE
   PUBLIC
+}
+
+model Request {
+  id              String        @id @default(auto()) @map("_id") @db.ObjectId
+  title           String
+  description     String
+  requestType     RequestType
+  priority        RequestPriority @default(MEDIUM)
+  status          RequestStatus @default(SUBMITTED)
+  fromDepartmentId String?      @db.ObjectId
+  toDepartmentId  String?       @db.ObjectId
+  createdById     String        @db.ObjectId
+  assignedToId    String?       @db.ObjectId
+  tentativeDeadline DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  // Relations
+  createdBy       User          @relation("RequestCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  assignedTo      User?         @relation("RequestAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  fromDepartment  Department?   @relation("RequestFromDepartment", fields: [fromDepartmentId], references: [id], onDelete: SetNull)
+  toDepartment    Department?   @relation("RequestToDepartment", fields: [toDepartmentId], references: [id], onDelete: SetNull)
+
+  @@index([createdById])
+  @@index([assignedToId])
+  @@index([toDepartmentId])
+  @@index([status])
+  @@map("requests")
+}
+
+enum RequestType {
+  AUTOMATION
+  DATA
+  ACCESS
+  SUPPORT
+  OTHER
+}
+
+enum RequestPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum RequestStatus {
+  SUBMITTED
+  APPROVED
+  REJECTED
+  IN_PROGRESS
+  WAITING_INFO
+  COMPLETED
+  CLOSED
 }
 
