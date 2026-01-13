@@ -1349,19 +1349,21 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
           console.log(`[Task Sync] Successfully synced task "${task.id}" status "${status}" to request "${relatedRequest.id}" (status: ${relatedRequest.status} -> ${requestStatus})`)
           
           // Log activity for request status change from task
-          try {
-            const { logActivity } = await import('./activities')
-            await logActivity({
-              userId: req.userId,
-              type: 'TASK_STATUS_CHANGED',
-              action: 'Request Status Updated from Task',
-              description: `Request "${relatedRequest.title}" status changed to ${requestStatus} via task update`,
-              entityType: 'request',
-              entityId: relatedRequest.id,
-            })
-          } catch (logError) {
-            // Don't fail if logging fails
-            console.error('Error logging request status change from task:', logError)
+          if (req.userId) {
+            try {
+              const { logActivity } = await import('../utils/activityLogger')
+              await logActivity({
+                userId: req.userId,
+                type: 'TASK_STATUS_CHANGED',
+                action: 'Request Status Updated from Task',
+                description: `Request "${relatedRequest.title}" status changed to ${requestStatus} via task update`,
+                entityType: 'request',
+                entityId: relatedRequest.id,
+              })
+            } catch (logError) {
+              // Don't fail if logging fails
+              console.error('Error logging request status change from task:', logError)
+            }
           }
         } else {
           if (oldTask.title.startsWith('[Request] ') || (oldTask.description && oldTask.description.includes('[RequestID:'))) {
