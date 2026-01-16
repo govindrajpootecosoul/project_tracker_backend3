@@ -33,9 +33,10 @@ function shouldRunNow(daysOfWeek: number[], timeOfDay: string, timezone: string)
     return false
   }
   
-  // Check if current time matches timeOfDay (within 1 minute tolerance)
+  // Check if current time matches timeOfDay (exact minute match only)
+  // This prevents multiple triggers within the same minute window
   const [targetHour, targetMinute] = timeOfDay.split(':').map(Number)
-  if (currentHour !== targetHour || Math.abs(currentMinute - targetMinute) > 1) {
+  if (currentHour !== targetHour || currentMinute !== targetMinute) {
     return false
   }
   
@@ -90,30 +91,48 @@ export async function runAutoEmailJob(): Promise<void> {
       }
       
       // Check if we already ran today for this department (prevent duplicates)
-      if (deptConfig.lastRunAt && new Date(deptConfig.lastRunAt) >= todayStart) {
-        continue // Already ran today for this department
-      }
-      
-      console.log(`[Auto Email] Starting automatic email send for department: ${deptConfig.department}`)
-      
-      // Send email for this department only
-      const result = await sendDepartmentWiseEmail(
-        deptConfig.department,
-        toEmails,
-        [], // No on-leave members for automatic sends
-        'system' // System user ID for automatic sends
-      )
-      
-      if (result.success) {
-        // Update lastRunAt for this department
-        await prisma.autoEmailDepartmentConfig.update({
-          where: { id: deptConfig.id },
+      // Use atomic update to prevent race conditions - only update if lastRunAt is null or before today
+      try {
+        const updated = await prisma.autoEmailDepartmentConfig.updateMany({
+          where: {
+            id: deptConfig.id,
+            OR: [
+              { lastRunAt: null },
+              { lastRunAt: { lt: todayStart } }
+            ]
+          },
           data: { lastRunAt: now },
         })
         
-        console.log(`[Auto Email] Successfully sent email for ${deptConfig.department}. Log ID: ${result.emailLogId}`)
-      } else {
-        console.error(`[Auto Email] Failed to send email for ${deptConfig.department}: ${result.error}`)
+        // If no rows were updated, it means another process already sent the email today
+        if (updated.count === 0) {
+          console.log(`[Auto Email] Skipping ${deptConfig.department} - already sent today (race condition prevented)`)
+          continue
+        }
+        
+        console.log(`[Auto Email] Starting automatic email send for department: ${deptConfig.department}`)
+        
+        // Send email for this department only
+        const result = await sendDepartmentWiseEmail(
+          deptConfig.department,
+          toEmails,
+          [], // No on-leave members for automatic sends
+          'system' // System user ID for automatic sends
+        )
+        
+        if (result.success) {
+          console.log(`[Auto Email] Successfully sent email for ${deptConfig.department}. Log ID: ${result.emailLogId}`)
+        } else {
+          // If email failed, reset lastRunAt to null so it can retry on next scheduled time
+          await prisma.autoEmailDepartmentConfig.update({
+            where: { id: deptConfig.id },
+            data: { lastRunAt: null },
+          })
+          console.error(`[Auto Email] Failed to send email for ${deptConfig.department}: ${result.error}. Will retry on next scheduled time.`)
+        }
+      } catch (error: any) {
+        console.error(`[Auto Email] Error processing department ${deptConfig.department}:`, error.message)
+        // Continue with other departments even if one fails
       }
     }
   } catch (error: any) {
