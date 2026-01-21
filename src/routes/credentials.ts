@@ -17,6 +17,101 @@ const sanitizeIdArray = (input: unknown): string[] => {
 
 const COLLAB_ROLES = new Set(['viewer', 'editor'])
 
+const buildCredentialAccessWhereClause = async (userId: string) => {
+  const currentUser = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { department: true },
+  })
+
+  const department = currentUser?.department
+
+  const whereClause: any = {
+    OR: [
+      { createdById: userId },
+      { members: { some: { userId } } },
+    ],
+  }
+
+  if (department) {
+    whereClause.OR.push({
+      AND: [
+        { privacyLevel: 'PUBLIC' },
+        { createdBy: { department } },
+      ],
+    })
+  }
+
+  return whereClause
+}
+
+// Credential filter values (for dropdowns)
+router.get('/filters/companies', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) return res.status(401).json({ error: 'Unauthorized' })
+    const whereClause = await buildCredentialAccessWhereClause(req.userId)
+
+    const rows = await prisma.credential.findMany({
+      where: whereClause,
+      distinct: ['company'],
+      select: { company: true },
+      orderBy: { company: 'asc' },
+    })
+
+    res.json(rows.map(r => r.company).filter(Boolean))
+  } catch (error) {
+    console.error('Error fetching credential companies:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+router.get('/filters/geographies', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) return res.status(401).json({ error: 'Unauthorized' })
+    const company = typeof req.query.company === 'string' ? req.query.company.trim() : ''
+    const whereClause = await buildCredentialAccessWhereClause(req.userId)
+
+    const rows = await prisma.credential.findMany({
+      where: {
+        ...whereClause,
+        ...(company ? { company } : {}),
+      },
+      distinct: ['geography'],
+      select: { geography: true },
+      orderBy: { geography: 'asc' },
+    })
+
+    res.json(rows.map(r => r.geography).filter(Boolean))
+  } catch (error) {
+    console.error('Error fetching credential geographies:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+router.get('/filters/platforms', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) return res.status(401).json({ error: 'Unauthorized' })
+    const company = typeof req.query.company === 'string' ? req.query.company.trim() : ''
+    const geography = typeof req.query.geography === 'string' ? req.query.geography.trim() : ''
+    const whereClause = await buildCredentialAccessWhereClause(req.userId)
+
+    const rows = await prisma.credential.findMany({
+      where: {
+        ...whereClause,
+        ...(company ? { company } : {}),
+        ...(geography ? { geography } : {}),
+      },
+      distinct: ['platform'],
+      select: { platform: true },
+      orderBy: { platform: 'asc' },
+    })
+
+    res.json(rows.map(r => r.platform).filter(Boolean))
+  } catch (error) {
+    console.error('Error fetching credential platforms:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // Get all credentials (user's own + shared + public credentials from same department)
 router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {

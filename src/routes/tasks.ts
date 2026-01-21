@@ -192,14 +192,8 @@ router.get('/department', authMiddleware, async (req: AuthRequest, res: Response
       return res.status(404).json({ error: 'User not found' })
     }
 
-    const userRole = currentUser.role?.toLowerCase()
-    const isAdmin = userRole === 'admin'
-    const isSuperAdmin = userRole === 'superadmin'
-
-    // Only admin and super admin can access department tasks
-    if (!isAdmin && !isSuperAdmin) {
-      return res.status(403).json({ error: 'Only admins can access department tasks' })
-    }
+    // Allow any authenticated user to access department tasks for their own department.
+    // (UI uses this for "Team Tasks" = all tasks assigned to members of the user's department.)
 
     if (!currentUser.department) {
       return res.status(400).json({ error: 'User does not have a department assigned' })
@@ -220,8 +214,11 @@ router.get('/department', authMiddleware, async (req: AuthRequest, res: Response
 
     const limit = parseInt(req.query.limit as string) || 20
     const skip = parseInt(req.query.skip as string) || 0
+    const memberId = (req.query.memberId as string | undefined) || null
+    const statusRaw = (req.query.status as string | undefined) || null
+    const status = statusRaw?.trim() || null
 
-    const where = {
+    const where: any = {
       assignees: {
         some: {
           userId: {
@@ -229,6 +226,20 @@ router.get('/department', authMiddleware, async (req: AuthRequest, res: Response
           },
         },
       },
+    }
+
+    // Optional: filter to a particular member (must be within the same department)
+    if (memberId) {
+      where.assignees = {
+        some: {
+          userId: memberId,
+        },
+      }
+    }
+
+    // Optional: status filter
+    if (status && status !== 'all') {
+      where.status = status
     }
 
     // Optimized: Removed comments, use select
@@ -330,11 +341,12 @@ router.get('/all-departments', authMiddleware, async (req: AuthRequest, res: Res
     const limit = parseInt(req.query.limit as string) || 20
     const skip = parseInt(req.query.skip as string) || 0
 
-    // Get current user's role
+    // Get current user's role + department (to exclude their own department)
     const currentUser = await prisma.user.findUnique({
       where: { id: req.userId },
       select: {
         role: true,
+        department: true,
       },
     })
 
@@ -350,9 +362,49 @@ router.get('/all-departments', authMiddleware, async (req: AuthRequest, res: Res
       return res.status(403).json({ error: 'Only super admins can access all departments tasks' })
     }
 
-    // Get all tasks from all departments
+    const currentUserDept = currentUser.department?.trim() || null
+    const requestedDeptRaw = (req.query.department as string | undefined) || null
+    const requestedDept = requestedDeptRaw?.trim() || null
+    const memberIdRaw = (req.query.memberId as string | undefined) || null
+    const memberId = memberIdRaw?.trim() || null
+
+    // Build a single prisma where clause so "total" matches the task list.
+    // "Other Department" means: exclude current user's department; optionally filter to a chosen department.
+    const where =
+      currentUserDept || requestedDept
+        ? {
+            assignees: {
+              some: {
+                user: {
+                  department: {
+                    ...(requestedDept ? { equals: requestedDept } : {}),
+                    ...(currentUserDept ? { not: currentUserDept } : {}),
+                  },
+                },
+              },
+            },
+          }
+        : undefined
+
+    // Optional: filter to a specific member (assignee userId)
+    // Note: this will naturally be constrained by department rules above if department is selected.
+    const whereWithMember =
+      memberId
+        ? {
+            ...(where ?? {}),
+            assignees: {
+              some: {
+                userId: memberId,
+                ...(where?.assignees?.some?.user ? { user: where.assignees.some.user } : {}),
+              },
+            },
+          }
+        : where
+
+    // Get tasks from other departments (optionally filtered by a specific department)
     const [tasks, total] = await Promise.all([
       prisma.task.findMany({
+        where: whereWithMember,
         include: {
           assignees: {
             include: {
@@ -405,7 +457,7 @@ router.get('/all-departments', authMiddleware, async (req: AuthRequest, res: Res
         take: limit,
         skip: skip,
       }),
-      prisma.task.count(),
+      prisma.task.count(whereWithMember ? { where: whereWithMember } : undefined),
     ])
 
     res.json({
