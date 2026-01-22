@@ -823,96 +823,88 @@ router.get('/stats', authMiddleware, async (req: AuthRequest, res: Response) => 
     const isAdmin = userRole === 'admin'
     const isSuperAdmin = userRole === 'superadmin'
 
-    let tasks: any[] = []
+    // Build a where clause for counting, instead of fetching all tasks and filtering in memory.
+    // This is significantly faster on MongoDB + Prisma for large datasets.
+    let whereBase: any = {}
 
-    // Determine which tasks to fetch based on view
-    if (view === 'my') {
-      // My tasks - only tasks assigned to the user
-      tasks = await prisma.task.findMany({
-        where: {
-          assignees: {
-            some: {
-              userId: req.userId,
-            },
-          },
+    if (view === 'my' || !view) {
+      whereBase = {
+        assignees: {
+          some: { userId: req.userId },
         },
-      })
+      }
     } else if (view === 'department') {
-      // Department tasks - only for admin/super admin
       if (!isAdmin && !isSuperAdmin) {
         return res.status(403).json({ error: 'Only admins can access department tasks' })
       }
-
       if (!currentUser.department) {
         return res.status(400).json({ error: 'User does not have a department assigned' })
       }
 
-      // Get all users in the same department
       const departmentUsers = await prisma.user.findMany({
         where: {
           department: currentUser.department,
           isActive: true,
         },
-        select: {
-          id: true,
-        },
+        select: { id: true },
       })
-
       const departmentUserIds = departmentUsers.map(u => u.id)
 
-      // Get tasks assigned to department users
-      tasks = await prisma.task.findMany({
-        where: {
-          assignees: {
-            some: {
-              userId: {
-                in: departmentUserIds,
-              },
-            },
+      whereBase = {
+        assignees: {
+          some: {
+            userId: { in: departmentUserIds },
           },
         },
-      })
+      }
     } else if (view === 'all-departments') {
-      // All departments tasks - only for super admin
       if (!isSuperAdmin) {
         return res.status(403).json({ error: 'Only super admins can access all departments tasks' })
       }
-
-      // Get all tasks
-      tasks = await prisma.task.findMany({})
+      whereBase = {}
     } else {
-      // Default to my tasks if invalid view - only assigned tasks
-      tasks = await prisma.task.findMany({
-        where: {
-          assignees: {
-            some: {
-              userId: req.userId,
-            },
-          },
+      // Default to my tasks if invalid view
+      whereBase = {
+        assignees: {
+          some: { userId: req.userId },
         },
-      })
+      }
     }
 
-    // Helper function to normalize status for comparison
-    const normalizeStatus = (status: string | null | undefined): string => {
-      if (!status) return ''
-      return String(status).toUpperCase().trim()
-    }
+    const now = new Date()
+
+    const [
+      totalTasks,
+      completedTasks,
+      inProgress,
+      yts,
+      onHold,
+      recurring,
+      overdue,
+    ] = await Promise.all([
+      prisma.task.count({ where: whereBase }),
+      prisma.task.count({ where: { ...whereBase, status: 'COMPLETED' } as any }),
+      prisma.task.count({ where: { ...whereBase, status: 'IN_PROGRESS' } as any }),
+      prisma.task.count({ where: { ...whereBase, status: 'YTS' } as any }),
+      prisma.task.count({ where: { ...whereBase, status: 'ON_HOLD' } as any }),
+      prisma.task.count({ where: { ...whereBase, recurring: { not: null } } as any }),
+      prisma.task.count({
+        where: {
+          ...whereBase,
+          dueDate: { lt: now },
+          NOT: [{ status: 'COMPLETED' }],
+        } as any,
+      }),
+    ])
 
     const stats = {
-      totalTasks: tasks.length,
-      completedTasks: tasks.filter(t => normalizeStatus(t.status) === 'COMPLETED').length,
-      inProgress: tasks.filter(t => normalizeStatus(t.status) === 'IN_PROGRESS').length,
-      yts: tasks.filter(t => normalizeStatus(t.status) === 'YTS').length,
-      onHold: tasks.filter(t => {
-        const status = normalizeStatus(t.status)
-        return status === 'ON_HOLD' || status === 'ONHOLD' || status === 'ON HOLD'
-      }).length,
-      overdue: tasks.filter(t => {
-        if (!t.dueDate) return false
-        return new Date(t.dueDate) < new Date() && normalizeStatus(t.status) !== 'COMPLETED'
-      }).length,
-      recurring: tasks.filter(t => t.recurring !== null).length,
+      totalTasks,
+      completedTasks,
+      inProgress,
+      yts,
+      onHold,
+      overdue,
+      recurring,
     }
 
     res.json(stats)

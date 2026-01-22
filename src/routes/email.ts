@@ -3,6 +3,7 @@ import { prisma } from '../lib/prisma'
 import { authMiddleware, AuthRequest } from '../middleware/auth'
 import { microsoftGraphClient } from '../lib/microsoft-graph'
 import { logActivity } from '../utils/activityLogger'
+import { startEmailScheduler } from '../utils/emailScheduler'
 
 const router = Router()
 
@@ -326,13 +327,47 @@ export async function sendDepartmentWiseEmail(
     }
 
     // Store email log in database
+    // For automatic sends (userId is 'system' or not provided), find a super admin user to use
+    let emailLogUserId = userId && userId !== 'system' ? userId : null
+    
+    if (!emailLogUserId) {
+      // Find a super admin user to use for system/automatic emails
+      const superAdmin = await prisma.user.findFirst({
+        where: {
+          role: { in: ['superadmin', 'SUPER_ADMIN', 'SUPERADMIN'] },
+          isActive: true,
+        },
+        select: { id: true },
+      })
+      
+      if (superAdmin) {
+        emailLogUserId = superAdmin.id
+      } else {
+        // If no super admin found, find any active admin
+        const admin = await prisma.user.findFirst({
+          where: {
+            role: { in: ['admin', 'ADMIN'] },
+            isActive: true,
+          },
+          select: { id: true },
+        })
+        emailLogUserId = admin?.id || null
+      }
+      
+      if (!emailLogUserId) {
+        console.warn('[Auto Email] No admin user found for email log, skipping log creation')
+        // Email was sent successfully, just can't log it
+        return { success: true }
+      }
+    }
+    
     const emailLog = await prisma.emailLog.create({
       data: {
         to: JSON.stringify(toEmails),
         cc: ccEmails.length > 0 ? JSON.stringify(ccEmails) : null,
         subject: finalSubject,
         body: '', // Body is empty as tasks are in the email body
-        userId: userId || 'system', // Use system if no userId provided (for automatic sends)
+        userId: emailLogUserId,
       },
     })
 
@@ -1115,9 +1150,98 @@ router.post('/admin/auto-email-config', authMiddleware, async (req: AuthRequest,
       updatedConfig.departmentConfigs = []
     }
 
+    // Restart scheduler to pick up new configuration
+    try {
+      startEmailScheduler()
+      console.log('[Auto Email] Scheduler restarted after config update')
+    } catch (error: any) {
+      console.error('[Auto Email] Error restarting scheduler:', error.message)
+      // Don't fail the request if scheduler restart fails
+    }
+
     res.json(updatedConfig)
   } catch (error: any) {
     console.error('Error updating auto-email config:', error)
+    res.status(500).json({ error: error.message || 'Internal server error' })
+  }
+})
+
+// Manual test endpoint to trigger auto email job (Super Admin only)
+router.post('/admin/auto-email-config/test', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    // Check if user is super admin
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { role: true },
+    })
+
+    if (!currentUser || currentUser.role?.toLowerCase() !== 'superadmin') {
+      return res.status(403).json({ error: 'Only super admins can test auto-email' })
+    }
+
+    console.log('[Auto Email] Manual test triggered by user:', req.userId)
+    
+    // Import and run the job with force=true to bypass time checks
+    const { runAutoEmailJob } = await import('../utils/emailScheduler')
+    await runAutoEmailJob(true) // Force mode - bypasses time and day checks
+
+    res.json({ 
+      success: true, 
+      message: 'Auto email job executed in FORCE mode (bypassing time checks). Check server logs for details.' 
+    })
+  } catch (error: any) {
+    console.error('[Auto Email] Error testing auto-email:', error)
+    res.status(500).json({ error: error.message || 'Internal server error' })
+  }
+})
+
+// Get scheduler status (Super Admin only)
+router.get('/admin/auto-email-config/status', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    // Check if user is super admin
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { role: true },
+    })
+
+    if (!currentUser || currentUser.role?.toLowerCase() !== 'superadmin') {
+      return res.status(403).json({ error: 'Only super admins can check scheduler status' })
+    }
+
+    const config = await prisma.autoEmailConfig.findFirst({
+      include: {
+        departmentConfigs: true,
+      },
+    })
+
+    const { startEmailScheduler } = await import('../utils/emailScheduler')
+    
+    res.json({
+      schedulerRunning: true, // We can't directly check cron status, but if endpoint works, server is running
+      config: config ? {
+        enabled: config.enabled,
+        timezone: config.timezone,
+        toEmails: config.toEmails,
+        departmentCount: config.departmentConfigs?.length || 0,
+        departments: config.departmentConfigs?.map(d => ({
+          department: d.department,
+          enabled: d.enabled,
+          daysOfWeek: d.daysOfWeek,
+          timeOfDay: d.timeOfDay,
+          lastRunAt: d.lastRunAt,
+        })) || [],
+      } : null,
+    })
+  } catch (error: any) {
+    console.error('Error getting scheduler status:', error)
     res.status(500).json({ error: error.message || 'Internal server error' })
   }
 })

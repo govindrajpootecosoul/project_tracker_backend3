@@ -113,6 +113,14 @@ model Task {
   reviewedBy User? @relation("ReviewedBy", fields: [reviewedById], references: [id])
   reviewer User? @relation("Reviewer", fields: [reviewerId], references: [id])
   
+  @@index([status])
+  @@index([createdAt])
+  @@index([dueDate])
+  @@index([statusUpdatedAt])
+  @@index([createdById])
+  @@index([projectId])
+  @@index([reviewerId])
+  @@index([reviewStatus])
   @@map("tasks")
 }
 
@@ -127,6 +135,8 @@ model TaskAssignee {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   
   @@unique([taskId, userId])
+  @@index([userId])
+  @@index([taskId])
   @@map("task_assignees")
 }
 
@@ -263,6 +273,9 @@ model ActivityLog {
   // Relations
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   
+  @@index([userId, createdAt])
+  @@index([entityType, entityId])
+  @@index([createdAt])
   @@map("activity_logs")
 }
 
