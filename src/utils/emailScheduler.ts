@@ -304,7 +304,6 @@ export function startEmailScheduler(): void {
   scheduledTask = cron.schedule('* * * * *', async () => {
     await runAutoEmailJob()
   }, {
-    scheduled: true,
     timezone: 'UTC' // Cron runs in UTC, we handle timezone conversion in shouldRunNow
   })
   
