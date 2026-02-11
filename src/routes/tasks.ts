@@ -914,6 +914,156 @@ router.get('/stats', authMiddleware, async (req: AuthRequest, res: Response) => 
   }
 })
 
+// Get all tasks for a project (where user is a member)
+router.get('/project/:projectId', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
+    const { projectId } = req.params
+    const limit = parseInt(req.query.limit as string) || 10000
+    const skip = parseInt(req.query.skip as string) || 0
+
+    // Validate ObjectID format
+    const isValidObjectId = (id: string | null | undefined): boolean => {
+      if (!id || typeof id !== 'string') return false
+      return /^[0-9a-fA-F]{24}$/.test(id.trim())
+    }
+
+    if (!isValidObjectId(projectId)) {
+      return res.status(400).json({ error: 'Invalid project ID format' })
+    }
+
+    // Get current user's role and department
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: {
+        role: true,
+        department: true,
+      },
+    })
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    const isSuperAdmin = currentUser.role?.toLowerCase() === 'superadmin'
+
+    // Check if user has access to this project
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      include: {
+        members: {
+          select: { userId: true },
+        },
+      },
+    })
+
+    if (!project) {
+      return res.status(404).json({ error: 'Project not found' })
+    }
+
+    // Check access: superadmin, project creator, or project member
+    const isMember = project.members.some((member) => member.userId === req.userId)
+    const isCreator = project.createdById === req.userId
+    const hasDepartmentAccess =
+      !!currentUser.department &&
+      !!project.department &&
+      currentUser.department === project.department
+
+    if (!isSuperAdmin && !isMember && !isCreator && !hasDepartmentAccess) {
+      return res.status(403).json({ error: 'You do not have access to this project' })
+    }
+
+    // Get all tasks for this project
+    const [tasks, total] = await Promise.all([
+      prisma.task.findMany({
+        where: { projectId },
+        select: {
+          id: true,
+          title: true,
+          description: true,
+          status: true,
+          priority: true,
+          startDate: true,
+          dueDate: true,
+          projectId: true,
+          brand: true,
+          tags: true,
+          recurring: true,
+          imageCount: true,
+          videoCount: true,
+          link: true,
+          reviewStatus: true,
+          reviewRequestedById: true,
+          reviewRequestedAt: true,
+          reviewerId: true,
+          reviewedById: true,
+          reviewedAt: true,
+          statusUpdatedAt: true,
+          createdAt: true,
+          updatedAt: true,
+          createdById: true,
+          assignees: {
+            select: {
+              id: true,
+              userId: true,
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                },
+              },
+            },
+          },
+          createdBy: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+          project: {
+            select: {
+              id: true,
+              name: true,
+              brand: true,
+              department: true,
+            },
+          },
+          reviewRequestedBy: {
+            select: { id: true, name: true, email: true },
+          },
+          reviewer: {
+            select: { id: true, name: true, email: true },
+          },
+          reviewedBy: {
+            select: { id: true, name: true, email: true },
+          },
+        },
+        orderBy: [
+          { createdAt: 'desc' },
+          { statusUpdatedAt: 'desc' },
+        ],
+        take: limit,
+        skip: skip,
+      }),
+      prisma.task.count({ where: { projectId } }),
+    ])
+
+    res.json({
+      tasks,
+      total,
+      hasMore: skip + tasks.length < total,
+    })
+  } catch (error) {
+    console.error('Error fetching project tasks:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // Get single task
 router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
@@ -1213,6 +1363,10 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
 // Update task
 router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
     const { title, description, status, priority, startDate, dueDate, projectId, brand, tags, recurring, assignees, imageCount, videoCount, link } = req.body
 
     // Get old task data for activity logging
@@ -1228,6 +1382,35 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     if (!oldTask) {
       return res.status(404).json({ error: 'Task not found' })
+    }
+
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { role: true },
+    })
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    const isSuperAdmin = currentUser.role?.toLowerCase() === 'superadmin'
+    const isAdmin = isSuperAdmin || currentUser.role?.toLowerCase() === 'admin'
+    const isAssignee = oldTask.assignees?.some((a) => a.userId === req.userId) ?? false
+
+    // Allow edit if admin/superadmin, OR assigned to the task.
+    // Project collaborators can view tasks, but should not be able to edit everything by default.
+    if (!isAdmin && !isAssignee) {
+      // Special case: reviewer can edit while task is UNDER_REVIEW
+      const reviewMeta = await prisma.task.findUnique({
+        where: { id: req.params.id },
+        select: { reviewStatus: true, reviewerId: true },
+      })
+      const isReviewerUnderReview =
+        reviewMeta?.reviewStatus === 'UNDER_REVIEW' && reviewMeta?.reviewerId === req.userId
+
+      if (!isReviewerUnderReview) {
+        return res.status(403).json({ error: 'You do not have permission to edit this task' })
+      }
     }
 
     // Validate ObjectID format if projectId is provided
@@ -1636,14 +1819,38 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
 // Delete task
 router.delete('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+
     // Get task data before deletion for activity logging
     const task = await prisma.task.findUnique({
       where: { id: req.params.id },
-      include: { project: { select: { name: true } } },
+      include: {
+        project: { select: { name: true } },
+        assignees: { select: { userId: true } },
+      },
     })
 
     if (!task) {
       return res.status(404).json({ error: 'Task not found' })
+    }
+
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { role: true },
+    })
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    const isSuperAdmin = currentUser.role?.toLowerCase() === 'superadmin'
+    const isAdmin = isSuperAdmin || currentUser.role?.toLowerCase() === 'admin'
+    const isAssignee = task.assignees?.some((a) => a.userId === req.userId) ?? false
+
+    if (!isAdmin && !isAssignee) {
+      return res.status(403).json({ error: 'You do not have permission to delete this task' })
     }
 
     await prisma.task.delete({
