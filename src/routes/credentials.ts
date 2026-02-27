@@ -122,13 +122,15 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
     const limit = parseInt(req.query.limit as string) || 20
     const skip = parseInt(req.query.skip as string) || 0
 
-    // Get current user's department
+    // Get current user's department and role
     const currentUser = await prisma.user.findUnique({
       where: { id: req.userId },
-      select: { department: true },
+      select: { department: true, role: true },
     })
 
     const department = currentUser?.department
+    const role = currentUser?.role?.toLowerCase()
+    const isSuperAdmin = role === 'superadmin'
 
     // Build the where clause
     const whereClause: any = {
@@ -190,13 +192,15 @@ router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ error: 'Unauthorized' })
     }
 
-    // Get current user's department
+    // Get current user's department and role
     const currentUser = await prisma.user.findUnique({
       where: { id: req.userId },
-      select: { department: true },
+      select: { department: true, role: true },
     })
 
     const department = currentUser?.department
+    const role = currentUser?.role?.toLowerCase()
+    const isSuperAdmin = role === 'superadmin'
 
     // Build the where clause
     const whereClause: any = {
@@ -316,30 +320,32 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Credential not found' })
     }
 
-    // Get current user's department
+    // Get current user's department and role
     const currentUser = await prisma.user.findUnique({
       where: { id: req.userId },
-      select: { department: true },
+      select: { department: true, role: true },
     })
 
     const department = currentUser?.department
+    const role = currentUser?.role?.toLowerCase()
+    const isSuperAdmin = role === 'superadmin'
 
     // Check if user has access to view this credential
     const isCreator = credential.createdById === req.userId
     const isMember = credential.members.some(m => m.userId === req.userId)
-    const isSameDepartment = department && credential.createdBy.department === department
+    const isSameDepartment = !!(department && credential.createdBy.department === department)
     const isPublic = credential.privacyLevel === 'PUBLIC'
 
-    const hasAccess = isCreator || isMember || (isPublic && isSameDepartment)
+    const hasAccess = isSuperAdmin || isCreator || isMember || (isPublic && isSameDepartment)
 
     if (!hasAccess) {
       return res.status(404).json({ error: 'Credential not found or insufficient permissions' })
     }
 
     // Check if user has edit permissions
-    // Allow: creator OR any member (viewer or editor) of shared credentials
+    // Allow: superadmin OR creator OR any member (viewer or editor) of shared credentials
     // Do NOT allow same department members to edit public credentials (they can only view)
-    const canEdit = isCreator || isMember
+    const canEdit = isSuperAdmin || isCreator || isMember
 
     if (!canEdit) {
       return res.status(403).json({ error: 'You do not have permission to edit this credential. Only the creator or members can edit shared credentials.' })
