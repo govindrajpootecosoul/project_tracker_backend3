@@ -1181,6 +1181,41 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
     const cleanTags = tags && tags.trim() !== '' ? tags.trim() : null
     const cleanRecurring = recurring && recurring.trim() !== '' ? recurring.trim() : null
 
+    // Enforce project department access for USER/ADMIN.
+    // SUPER_ADMIN can create tasks in any project's department.
+    if (cleanProjectId) {
+      const currentUser = await prisma.user.findUnique({
+        where: { id: req.userId },
+        select: { role: true, department: true },
+      })
+      if (!currentUser) {
+        return res.status(404).json({ error: 'User not found' })
+      }
+
+      const role = currentUser.role?.toLowerCase() || 'user'
+      const isSuperAdmin = role === 'superadmin'
+
+      if (!isSuperAdmin) {
+        const userDept = currentUser.department?.trim() || null
+        if (!userDept) {
+          return res.status(400).json({ error: 'User does not have a department assigned' })
+        }
+
+        const project = await prisma.project.findUnique({
+          where: { id: cleanProjectId },
+          select: { id: true, department: true },
+        })
+        if (!project) {
+          return res.status(404).json({ error: 'Project not found' })
+        }
+
+        const projectDept = project.department?.trim() || null
+        if (projectDept && projectDept !== userDept) {
+          return res.status(403).json({ error: 'You do not have access to create tasks for this project' })
+        }
+      }
+    }
+
     const startDateValue =
       typeof startDate === 'string' && startDate.trim() !== ''
         ? new Date(startDate)
@@ -1426,6 +1461,36 @@ router.put('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
     const cleanProjectId = projectId && projectId.trim() !== '' && isValidObjectId(projectId)
       ? projectId.trim()
       : null
+
+    // Enforce project department access for USER/ADMIN when changing project.
+    if (cleanProjectId) {
+      const role = currentUser.role?.toLowerCase() || 'user'
+      const isSuperAdmin = role === 'superadmin'
+
+      if (!isSuperAdmin) {
+        const currentUserMeta = await prisma.user.findUnique({
+          where: { id: req.userId },
+          select: { department: true },
+        })
+        const userDept = currentUserMeta?.department?.trim() || null
+        if (!userDept) {
+          return res.status(400).json({ error: 'User does not have a department assigned' })
+        }
+
+        const project = await prisma.project.findUnique({
+          where: { id: cleanProjectId },
+          select: { id: true, department: true },
+        })
+        if (!project) {
+          return res.status(404).json({ error: 'Project not found' })
+        }
+
+        const projectDept = project.department?.trim() || null
+        if (projectDept && projectDept !== userDept) {
+          return res.status(403).json({ error: 'You do not have access to assign this project to the task' })
+        }
+      }
+    }
 
     const parseCount = (value: unknown): number | undefined => {
       if (value === undefined || value === null || value === '') return undefined
