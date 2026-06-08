@@ -13,10 +13,15 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     // Get view parameter (my/department/all-departments)
     const view = req.query.view as string || 'my'
-    const limit = parseInt((req.query.limit as string) || '20', 10)
+    const rawLimit = parseInt((req.query.limit as string) || '20', 10)
+    const limitRequested = Number.isFinite(rawLimit) ? rawLimit : 20
+    const limit = Math.min(Math.max(limitRequested, 1), 50) // hard cap for performance
     const skip = parseInt((req.query.skip as string) || '0', 10)
 
-    console.log('Fetching activities for user:', req.userId, 'view:', view, 'limit:', limit, 'skip:', skip)
+    const shouldLog = process.env.NODE_ENV !== 'production'
+    if (shouldLog) {
+      console.log('Fetching activities:', { userId: req.userId, view, limit, skip })
+    }
 
     // Check if ActivityLog model exists in Prisma client
     if (!prisma.activityLog) {
@@ -41,34 +46,30 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
     const isAdmin = userRole === 'admin'
     const isSuperAdmin = userRole === 'superadmin'
 
-    let taskIds: string[] = []
-    let projectIds: string[] = []
-    let userIds: string[] = []
+    // Performance note:
+    // Avoid building huge taskId/projectId lists for OR filters; those become slow as data grows.
+    // We keep semantics close while staying fast:
+    // - my: activities by user OR activities on projects the user is a member of
+    // - department: activities by users in the department
+    // - all-departments: all activities
+    let whereClause: any = {}
 
     // Determine which activities to fetch based on view
     if (view === 'my') {
-      // My activities - activities from user's assigned tasks only
       const userProjects = await prisma.projectMember.findMany({
         where: { userId: req.userId },
         select: { projectId: true },
       })
+      const projectIds = userProjects.map((p) => p.projectId)
 
-      projectIds = userProjects.map(p => p.projectId)
-
-      // Only get tasks assigned to the user (not created by them)
-      const userTasks = await prisma.task.findMany({
-        where: {
-          assignees: {
-            some: {
-              userId: req.userId,
-            },
-          },
-        },
-        select: { id: true },
-      })
-
-      taskIds = userTasks.map(t => t.id)
-      userIds = [req.userId]
+      whereClause = projectIds.length
+        ? {
+            OR: [
+              { userId: req.userId },
+              { entityType: 'project', entityId: { in: projectIds } },
+            ],
+          }
+        : { userId: req.userId }
     } else if (view === 'department') {
       // Department activities - only for admin/super admin
       if (!isAdmin && !isSuperAdmin) {
@@ -90,105 +91,33 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
         },
       })
 
-      userIds = departmentUsers.map(u => u.id)
-
-      // Get tasks assigned to department users
-      const departmentTasks = await prisma.task.findMany({
-        where: {
-          assignees: {
-            some: {
-              userId: {
-                in: userIds,
-              },
-            },
-          },
-        },
-        select: { id: true },
-      })
-
-      taskIds = departmentTasks.map(t => t.id)
-
-      // Get projects that department users are members of
-      const departmentProjects = await prisma.projectMember.findMany({
-        where: {
-          userId: {
-            in: userIds,
-          },
-        },
-        select: { projectId: true },
-      })
-
-      projectIds = [...new Set(departmentProjects.map(p => p.projectId))]
+      const userIds = departmentUsers.map((u) => u.id)
+      whereClause = userIds.length ? { userId: { in: userIds } } : { userId: req.userId }
     } else if (view === 'all-departments') {
       // All departments activities - only for super admin
       if (!isSuperAdmin) {
         return res.status(403).json({ error: 'Only super admins can access all departments activities' })
       }
-
-      // Get all tasks
-      const allTasks = await prisma.task.findMany({
-        select: { id: true },
-      })
-
-      taskIds = allTasks.map(t => t.id)
-
-      // Get all projects
-      const allProjects = await prisma.project.findMany({
-        select: { id: true },
-      })
-
-      projectIds = allProjects.map(p => p.id)
-
-      // Get all users
-      const allUsers = await prisma.user.findMany({
-        select: { id: true },
-      })
-
-      userIds = allUsers.map(u => u.id)
+      whereClause = {}
     } else {
-      // Default to my activities if invalid view - only assigned tasks
+      // Default to "my" behavior
       const userProjects = await prisma.projectMember.findMany({
         where: { userId: req.userId },
         select: { projectId: true },
       })
-
-      projectIds = userProjects.map(p => p.projectId)
-
-      // Only get tasks assigned to the user (not created by them)
-      const userTasks = await prisma.task.findMany({
-        where: {
-          assignees: {
-            some: {
-              userId: req.userId,
-            },
-          },
-        },
-        select: { id: true },
-      })
-
-      taskIds = userTasks.map(t => t.id)
-      userIds = [req.userId]
+      const projectIds = userProjects.map((p) => p.projectId)
+      whereClause = projectIds.length
+        ? {
+            OR: [
+              { userId: req.userId },
+              { entityType: 'project', entityId: { in: projectIds } },
+            ],
+          }
+        : { userId: req.userId }
     }
 
-    console.log('User project IDs:', projectIds)
-    console.log('User task IDs:', taskIds)
-    console.log('User IDs:', userIds)
-
-    // Get activities related to tasks, projects, and users
     const activities = await prisma.activityLog.findMany({
-      where: {
-        OR: [
-          { userId: { in: userIds } },
-          {
-            entityType: 'task',
-            entityId: { in: taskIds },
-          },
-          {
-            entityType: 'project',
-            entityId: { in: projectIds },
-          },
-        ],
-      },
+      where: whereClause,
       include: {
         user: {
           select: {
@@ -204,21 +133,6 @@ router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       take: limit,
       skip: skip,
     })
-
-    console.log('Found activities:', activities.length)
-    if (activities.length > 0) {
-      console.log('Activities:', activities.map(a => ({ id: a.id, type: a.type, description: a.description, userId: a.userId })))
-    } else {
-      // Check if there are any activities at all in the database
-      const allActivities = await prisma.activityLog.findMany({
-        take: 5,
-        orderBy: { createdAt: 'desc' },
-      })
-      console.log('Total activities in database:', allActivities.length)
-      if (allActivities.length > 0) {
-        console.log('Sample activities:', allActivities.map(a => ({ id: a.id, type: a.type, userId: a.userId, entityType: a.entityType, entityId: a.entityId })))
-      }
-    }
 
     res.json(activities)
   } catch (error: any) {

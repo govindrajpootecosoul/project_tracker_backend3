@@ -9,57 +9,95 @@ const router = Router()
 // Get all tasks
 router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const tasks = await prisma.task.findMany({
-      include: {
-        assignees: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-        },
-        createdBy: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
-        project: true,
-        reviewRequestedBy: {
-          select: { id: true, name: true, email: true },
-        },
-        reviewer: {
-          select: { id: true, name: true, email: true },
-        },
-        reviewedBy: {
-          select: { id: true, name: true, email: true },
-        },
-        comments: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-          orderBy: {
-            createdAt: 'desc',
-          },
-        },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    })
+    const rawLimit = parseInt(req.query.limit as string)
+    const limitRequested = Number.isFinite(rawLimit) ? rawLimit : 50
+    const limit = Math.min(Math.max(limitRequested, 1), 200)
+    const skip = parseInt(req.query.skip as string) || 0
+    const includeComments = String(req.query.includeComments || '').trim() === '1'
 
-    res.json(tasks)
+    const [tasks, total] = await Promise.all([
+      prisma.task.findMany({
+        select: {
+          id: true,
+          title: true,
+          description: true,
+          status: true,
+          priority: true,
+          startDate: true,
+          dueDate: true,
+          projectId: true,
+          brand: true,
+          tags: true,
+          recurring: true,
+          imageCount: true,
+          videoCount: true,
+          link: true,
+          reviewStatus: true,
+          reviewRequestedById: true,
+          reviewRequestedAt: true,
+          reviewerId: true,
+          reviewedById: true,
+          reviewedAt: true,
+          statusUpdatedAt: true,
+          createdAt: true,
+          updatedAt: true,
+          createdById: true,
+          assignees: {
+            select: {
+              id: true,
+              userId: true,
+              user: {
+                select: { id: true, name: true, email: true },
+              },
+            },
+          },
+          createdBy: {
+            select: { id: true, name: true, email: true },
+          },
+          project: {
+            select: { id: true, name: true, brand: true, department: true },
+          },
+          reviewRequestedBy: {
+            select: { id: true, name: true, email: true },
+          },
+          reviewer: {
+            select: { id: true, name: true, email: true },
+          },
+          reviewedBy: {
+            select: { id: true, name: true, email: true },
+          },
+          ...(includeComments
+            ? {
+                comments: {
+                  select: {
+                    id: true,
+                    content: true,
+                    taskId: true,
+                    userId: true,
+                    mentions: true,
+                    createdAt: true,
+                    updatedAt: true,
+                    user: {
+                      select: { id: true, name: true, email: true },
+                    },
+                  },
+                  orderBy: { createdAt: 'desc' },
+                },
+              }
+            : {}),
+        },
+        orderBy: [{ createdAt: 'desc' }, { statusUpdatedAt: 'desc' }],
+        take: limit,
+        skip,
+      }),
+      prisma.task.count(),
+    ])
+
+    res.json({
+      tasks,
+      total,
+      hasMore: skip + tasks.length < total,
+    })
   } catch (error) {
     console.error('Error fetching tasks:', error)
     res.status(500).json({ error: 'Internal server error' })
@@ -922,7 +960,9 @@ router.get('/project/:projectId', authMiddleware, async (req: AuthRequest, res: 
     }
 
     const { projectId } = req.params
-    const limit = parseInt(req.query.limit as string) || 10000
+    const rawLimit = parseInt(req.query.limit as string)
+    const limitRequested = Number.isFinite(rawLimit) ? rawLimit : 100
+    const limit = Math.min(Math.max(limitRequested, 1), 200) // Hard cap to protect API/DB for 200+ active users
     const skip = parseInt(req.query.skip as string) || 0
 
     // Validate ObjectID format
